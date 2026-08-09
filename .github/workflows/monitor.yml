@@ -1,0 +1,54 @@
+name: Lead Monitor
+
+# Планирование теперь полностью на внешнем cron-job.org (встроенный schedule
+# у GitHub ненадёжен на бесплатном тарифе - подтвердили на практике).
+# Оставлен только workflow_dispatch: именно его дёргает cron-job.org, и он же
+# доступен для ручного запуска кнопкой Run workflow.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+# Не даёт двум прогонам выполняться одновременно (иначе они бы дрались за
+# git push в конце) - следующий запуск просто подождёт, пока текущий закончится.
+concurrency:
+  group: lead-monitor
+  cancel-in-progress: false
+
+jobs:
+  check-leads:
+    runs-on: ubuntu-latest
+    # Жёсткий потолок: даже если что-то внутри зависнет, весь прогон
+    # принудительно остановится через 5 минут, а не будет висеть часами.
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run lead monitor
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          IMAP_HOST: ${{ secrets.IMAP_HOST }}
+          IMAP_USER: ${{ secrets.IMAP_USER }}
+          IMAP_PASSWORD: ${{ secrets.IMAP_PASSWORD }}
+          SUPERJOB_API_KEY: ${{ secrets.SUPERJOB_API_KEY }}
+        run: python lead_monitor.py
+
+      - name: Save seen-leads state back to the repo
+        run: |
+          git config user.name "lead-monitor-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add seen_leads.json
+          git diff --staged --quiet || git commit -m "chore: update seen leads"
+          git push
