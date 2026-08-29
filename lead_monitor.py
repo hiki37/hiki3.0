@@ -14,6 +14,11 @@
    Дальше этот скрипт читает эти письма по IMAP и пересылает их в Telegram.
    Он не логинится на kwork.ru и не имеет отношения к самому сайту вообще.
 
+   ВАЖНО: письма от Kwork бывают двух видов. Дайджест "Новые проекты на бирже"
+   фильтруется по ключевым словам, а личные письма (покупатель написал в личку,
+   оформил заказ, прислал предложение) уходят в Telegram ВСЕГДА, без фильтра -
+   это уже не лид, а клиент, который ждёт ответа.
+
 3. Яндекс Крауд - это не биржа фриланса, а найм в саму Яндекс (сотрудники поддержки,
    продаж, контента, тестирования и т.д. с зарплатой на карту). На их сайте
    crowd.yandex.ru нет категории "разработка" и нет официального RSS/API.
@@ -33,6 +38,7 @@
 """
 
 import email
+import html as html_module
 import imaplib
 import json
 import os
@@ -166,17 +172,35 @@ def save_seen(seen):
         json.dump(list(seen), f, ensure_ascii=False)
 
 
-def strip_html(text):
+def strip_html(text, keep_newlines=False):
+    """HTML -> читаемый текст.
+
+    keep_newlines=True сохраняет переносы строк (нужно для постов из
+    Telegram, где перенос - часть смысла), иначе всё схлопывается в одну
+    строку (так удобнее матчить по ключевым словам).
+    """
     if not text:
         return ""
     # Сначала убираем блоки <style> и <script> целиком вместе с содержимым
     # (именно оттуда вываливается CSS в уведомления от Kwork)
     text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.DOTALL | re.IGNORECASE)
     text = re.sub(r"<script[^>]*>.*?</script>", " ", text, flags=re.DOTALL | re.IGNORECASE)
+    if keep_newlines:
+        text = re.sub(r"<br\s*/?>", "\n", text, flags=re.IGNORECASE)
+        text = re.sub(r"</(?:p|div|tr|li)\s*>", "\n", text, flags=re.IGNORECASE)
     # Теперь убираем оставшиеся HTML-теги
     text = re.sub(r"<[^>]+>", " ", text)
-    # Схлопываем множественные пробелы/переносы
-    text = re.sub(r"\s+", " ", text)
+    # &amp; &nbsp; &gt; и прочие сущности -> нормальные символы.
+    # Без этого в уведомление уезжает "Разработка и IT &gt; Боты".
+    text = html_module.unescape(text)
+    text = text.replace("\xa0", " ")
+    if keep_newlines:
+        text = re.sub(r"[ \t]+", " ", text)
+        text = re.sub(r"\n[ \t]*", "\n", text)
+        text = re.sub(r"\n{3,}", "\n\n", text)
+    else:
+        # Схлопываем множественные пробелы/переносы
+        text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
@@ -218,8 +242,14 @@ def generate_draft(title, description):
         return None
 
 
-def notify(source, title, description, link):
-    msg = f"🆕 {source}\n\n{title}\n\n{description[:300]}"
+def notify(source, title, description, link, details=None):
+    """details - уже собранный текст уведомления. Если он задан, description
+    не используется: источник сам решил, что и как показывать (у Kwork,
+    например, это цена + рубрика + покупатель отдельными строками)."""
+    body = details if details is not None else (description or "")[:300]
+    msg = f"🆕 {source}\n\n{title}"
+    if body:
+        msg += f"\n\n{body}"
     if link:
         msg += f"\n\n🔗 {link}"
 
@@ -230,6 +260,16 @@ def notify(source, title, description, link):
 
     send_telegram(msg)
     print(f"[+] {source}: {title}")
+
+
+USER_AGENT = "lead-monitor-personal-script/1.0"
+
+
+def fetch_url(url, timeout=15):
+    """Обычный GET с таймаутом и User-Agent. Возвращает текст страницы."""
+    r = requests.get(url, timeout=timeout, headers={"User-Agent": USER_AGENT})
+    r.raise_for_status()
+    return r.text
 
 
 def fetch_feed(url, timeout=15):
@@ -360,24 +400,249 @@ def get_email_body(msg):
         return text
 
 
+# Письма от Kwork бывают двух разных сортов, и путать их нельзя:
+#
+#  1. Дайджест "Новые проекты на бирже Kwork" - список чужих заказов, которые
+#     ещё нужно отфильтровать по ключевым словам (интересно далеко не всё).
+#
+#  2. Личные письма: покупатель написал тебе в личку, прислал предложение,
+#     оформил заказ. Это не "лид", это уже КЛИЕНТ, который ждёт ответа.
+#     Такие письма отправляются в Telegram ВСЕГДА, мимо фильтра по ключевым
+#     словам - раньше они молча выбрасывались, потому что в тексте письма
+#     ("Получены новые сообщения от Vkira7") нет ни одного слова из KEYWORDS.
+KWORK_DIRECT_SUBJECT_MARKERS = (
+    "новые сообщения",
+    "новое сообщение",
+    "заказ",
+    "предложени",
+    "отклик",
+    "оплат",
+    "сделка",
+    "арбитраж",
+)
+
+# Куски вёрстки письма, которые не несут смысла и раньше уезжали в Telegram
+# вперемешку с названием заказа ("Название Покупатель Цена Заполнить...").
+_KWORK_BOILERPLATE = (
+    "перейти на kwork.ru",
+    "Название Покупатель Цена",
+    "Ваши настройки на бирже",
+    "Доступно коннектов",
+    "Дата пополнения",
+    "Любимых рубрик",
+    "Уведомления",
+    "Что это?",
+    "Изменить",
+    "Настроить",
+    "Отписаться",
+    "Ответить на сайте",
+    "Если вы не хотите получать письма от нас, вы можете отписаться от рассылки",
+    "Будьте всегда на связи и не пропускайте важные события.",
+    "Скачайте приложение Kwork.",
+)
+
+
+def clean_kwork_text(text):
+    """Убирает из текста письма шапку/подвал/подписи Kwork."""
+    for junk in _KWORK_BOILERPLATE:
+        text = text.replace(junk, " ")
+    # "+3 новых подходящих проекта За последний час на бирже Kwork размещено
+    # 18 новых проектов. В ваших любимых рубриках ... доступно 3 новых проекта."
+    text = re.sub(r"\+?\d+\s+нов\w+\s+подходящ\w+\s+проект\w*", " ", text)
+    text = re.sub(r"За последни\w+[^.]*\.", " ", text)
+    text = re.sub(r"В ваших любимых рубриках[^.]*\.", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def is_kwork_direct_mail(subject):
+    low = (subject or "").lower()
+    if "новые проекты на бирже" in low:
+        return False
+    return any(marker in low for marker in KWORK_DIRECT_SUBJECT_MARKERS)
+
+
+# Ссылка на конкретный заказ внутри дайджеста. Kwork отдаёт её как
+# https://kwork.ru/new_offer?project=3216597 - обрати внимание на "=",
+# из-за которого старое выражение (ожидавшее "project3216597") не
+# срабатывало НИ РАЗУ, и каждое письмо уходило в аварийную ветку одним
+# слипшимся куском текста. "=?" оставлен на случай, если Kwork вернёт
+# старый формат без знака равенства.
+_KWORK_PROJECT_HREF = re.compile(
+    r'href="(https?://(?:www\.)?kwork\.ru/new_offer\?project=?(\d+)[^"]*)"',
+    re.IGNORECASE,
+)
+
+
+def parse_kwork_digest(body):
+    """Разбирает HTML дайджеста Kwork на отдельные проекты.
+
+    Каждый заказ в письме - это строка таблицы <tr> из трёх ячеек:
+    название+рубрика, покупатель со статистикой, цена. Возвращает список
+    словарей; пустой список означает "вёрстку письма разобрать не удалось".
+    """
+    projects = []
+    for row in re.findall(r"<tr\b.*?</tr>", body, flags=re.DOTALL | re.IGNORECASE):
+        href = _KWORK_PROJECT_HREF.search(row)
+        if not href:
+            continue
+        link, project_id = href.group(1), href.group(2)
+
+        cells = re.findall(r"<td\b[^>]*>(.*?)</td>", row, flags=re.DOTALL | re.IGNORECASE)
+        first_cell = cells[0] if cells else row
+
+        title_match = re.search(
+            r'<a[^>]+href="[^"]*new_offer\?project=?\d+[^"]*"[^>]*>(.*?)</a>',
+            row, flags=re.DOTALL | re.IGNORECASE,
+        )
+        title = strip_html(title_match.group(1)) if title_match else ""
+        if not title:
+            continue
+
+        # Рубрика лежит в отдельном <div> сразу после ссылки на заказ.
+        category = ""
+        cat_match = re.search(
+            r"</a>\s*</div>\s*<div[^>]*>(.*?)</div>", first_cell,
+            flags=re.DOTALL | re.IGNORECASE,
+        )
+        if cat_match:
+            category = strip_html(cat_match.group(1))
+        else:
+            rest = strip_html(first_cell).replace(title, " ").strip()
+            category = rest
+        # Kwork иногда ставит двойную стрелку: "Скрипты, боты > > ИИ-боты"
+        category = re.sub(r"(?:\s*>\s*)+", " > ", category).strip(" >")
+
+        buyer, buyer_stats = "", ""
+        if len(cells) > 1:
+            user_match = re.search(r"kwork\.ru/user/([^\"?/]+)", cells[1], re.IGNORECASE)
+            if user_match:
+                buyer = user_match.group(1)
+            stats_text = strip_html(cells[1])
+            bits = []
+            projects_match = re.search(r"(\d+)\s+проект\w*\s+на\s+бирже", stats_text)
+            if projects_match:
+                bits.append(projects_match.group(0))
+            hired_match = re.search(r"(\d+)%\s+нанято", stats_text)
+            if hired_match:
+                bits.append(hired_match.group(0))
+            buyer_stats = ", ".join(bits)
+
+        price = strip_html(cells[2]) if len(cells) > 2 else ""
+
+        projects.append({
+            "id": project_id,
+            "title": title,
+            "category": category,
+            "buyer": buyer,
+            "buyer_stats": buyer_stats,
+            "price": price,
+            "link": link,
+        })
+    return projects
+
+
+def format_kwork_details(project):
+    lines = []
+    if project["price"]:
+        lines.append("💰 " + project["price"])
+    if project["category"]:
+        lines.append("📂 " + project["category"])
+    if project["buyer"]:
+        who = "👤 " + project["buyer"]
+        if project["buyer_stats"]:
+            who += " (" + project["buyer_stats"] + ")"
+        lines.append(who)
+    return "\n".join(lines)
+
+
+def handle_kwork_digest(seen, subject, body):
+    projects = parse_kwork_digest(body)
+
+    if not projects:
+        # Аварийная ветка: Kwork поменял вёрстку. Лучше грубое уведомление,
+        # чем тишина - но хотя бы без шапки, подвала и слова "Цена".
+        print("[kwork-mail] ВНИМАНИЕ: не удалось разобрать письмо на отдельные "
+              "заказы - шлю письмо целиком. Похоже, Kwork поменял вёрстку.")
+        text = clean_kwork_text(strip_html(body))
+        if matches_keywords(subject + " " + text[:5000]):
+            notify("Kwork (письмо не разобрано)", subject, "", "https://kwork.ru/projects",
+                   details=text[:400])
+        return
+
+    for project in projects:
+        # Дедупликация по номеру заказа, а не по письму: один и тот же заказ
+        # приходит в нескольких дайджестах подряд, а уведомить надо один раз.
+        uid = "kwork-project:" + project["id"]
+        if uid in seen:
+            continue
+        seen.add(uid)
+        if matches_keywords(project["title"] + " " + project["category"]):
+            notify("Kwork", project["title"], "", project["link"],
+                   details=format_kwork_details(project))
+
+
+def handle_kwork_direct(seen, subject, body):
+    """Личное письмо: покупатель написал/заказал. Шлём всегда, без фильтра."""
+    text = clean_kwork_text(strip_html(body))
+
+    author = ""
+    author_match = re.search(r"kwork\.ru/inbox/([^\"?/]+)", body, re.IGNORECASE)
+    if author_match:
+        author = author_match.group(1)
+    else:
+        author_match = re.search(r"\bот\s+([A-Za-z0-9_.\-]{2,})", text)
+        if author_match:
+            author = author_match.group(1)
+
+    link_match = re.search(
+        r'href="(https?://(?:www\.)?kwork\.ru/(?:inbox|track|new_offer|payer_orders)[^"]*)"',
+        body, re.IGNORECASE,
+    )
+    link = link_match.group(1) if link_match else "https://kwork.ru/inbox"
+
+    title = subject
+    if author:
+        title = "Покупатель " + author + " ждёт ответа"
+
+    notify("Kwork — ЛИЧНОЕ ⚡", title, "", link, details=text[:500])
+
+
+def kwork_search(conn, since):
+    """Ищем письма от Kwork за нужный период.
+
+    Фильтр по отправителю отдаём самому серверу (FROM) - иначе скрипт качает
+    подряд ВСЮ почту за сутки и отбрасывает лишнее уже у себя. Если сервер
+    такой поиск не поддерживает, откатываемся на поиск только по дате.
+    """
+    for criteria in ('(SINCE "%s" FROM "kwork")' % since, '(SINCE "%s")' % since):
+        try:
+            status, data = conn.search(None, criteria)
+        except Exception as e:
+            print("[kwork-mail] поиск %s не сработал (%s): %s" % (criteria, type(e).__name__, e))
+            continue
+        if status == "OK" and data and data[0] is not None:
+            return data[0].split()
+    return []
+
+
 def check_kwork_mail(seen):
     if not KWORK_ENABLED:
         return
     if not IMAP_USER or not IMAP_PASSWORD:
         print("[kwork-mail] IMAP_USER/IMAP_PASSWORD не заданы - пропускаю")
         return
+
+    conn = None
     try:
         conn = imaplib.IMAP4_SSL(IMAP_HOST, timeout=20)
         conn.login(IMAP_USER, IMAP_PASSWORD)
         conn.select(IMAP_FOLDER)
 
-        since = imap_date(datetime.now() - timedelta(hours=3))
-        status, data = conn.search(None, f'(SINCE "{since}")')
-        if status != "OK":
-            conn.logout()
-            return
+        # Сутки, а не 3 часа: SINCE в IMAP работает с точностью до ДАТЫ, и при
+        # запуске сразу после полуночи трёхчасовое окно теряло вечернюю почту.
+        since = imap_date(datetime.now() - timedelta(days=1))
 
-        for num in data[0].split():
+        for num in kwork_search(conn, since):
             # BODY.PEEK - читаем письмо, не помечая его прочитанным у тебя в почте
             status, msg_data = conn.fetch(num, "(BODY.PEEK[])")
             if status != "OK" or not msg_data or not msg_data[0]:
@@ -385,72 +650,43 @@ def check_kwork_mail(seen):
 
             msg = email.message_from_bytes(msg_data[0][1])
             sender = decode_mime(msg.get("From", ""))
-
             if KWORK_SENDER_MATCH.lower() not in sender.lower():
                 continue
 
-            message_id = msg.get("Message-ID") or f"num:{num.decode()}"
+            # Дедупликация ТОЛЬКО по Message-ID письма. Раньше здесь была ещё
+            # проверка "тема + дата", но дата бралась как Date[:16] - а это
+            # "Wed, 27 Aug 2026", то есть точность до СУТОК, а не до часа.
+            # Тема у всех дайджестов одна и та же, поэтому из десятка писем
+            # за день обрабатывалось ровно одно, а остальные молча выкидывались.
+            # Именно поэтому бот "перестал присылать сообщения".
+            message_id = msg.get("Message-ID") or ("num:" + num.decode())
             uid = "kwork:" + message_id
-
-            # Дополнительная дедупликация по теме+дате: Kwork шлёт несколько
-            # дайджестов подряд с разными Message-ID, но одинаковой темой и датой.
-            # Если тема+дата уже видели - пропускаем, даже если Message-ID новый.
-            subject_raw = decode_mime(msg.get("Subject", ""))
-            date_raw = msg.get("Date", "")[:16]  # точность до часа
-            subject_uid = "kwork-subj:" + subject_raw + "|" + date_raw
-
-            if uid in seen or subject_uid in seen:
-                seen.add(uid)  # запоминаем Message-ID чтобы не проверять снова
+            if uid in seen:
                 continue
             seen.add(uid)
-            seen.add(subject_uid)
 
+            subject = decode_mime(msg.get("Subject", ""))
             body = get_email_body(msg)
 
-            # Письма-дайджесты от Kwork на самом деле содержат таблицу с
-            # отдельными заказами внутри - каждый со своей ссылкой вида
-            # kwork.ru/projects/12345-nazvanie. Раньше весь текст письма
-            # (шапка + таблица) просто склеивался в одну кашу после
-            # снятия тегов - оттуда и "Название Покупатель Цена Дизайн
-            # визитки...". Теперь сначала пробуем вытащить именно ссылки
-            # на конкретные заказы и обработать их по отдельности - так
-            # же, как FL.ru/Weblancer/hh.ru дают заголовок+ссылку на
-            # каждый лид, а не один слипшийся кусок текста.
-            project_links = re.findall(
-                r'<a[^>]+href="(https?://(?:www\.)?kwork\.ru/new_offer\?project\d+)"[^>]*>(.*?)</a>(.{0,400}?)</td>',
-                body, flags=re.IGNORECASE | re.DOTALL,
-            )
-            project_links = [
-                (link, strip_html(title), strip_html(extra))
-                for link, title, extra in project_links
-                if strip_html(title)
-            ]
-
-            if project_links:
-                for link, title, category_text in project_links:
-                    link_uid = "kwork-link:" + link
-                    if link_uid in seen:
-                        continue
-                    seen.add(link_uid)
-                    # Матчим по заголовку + категории (категория от Kwork -
-                    # например "Скрипты, боты и mini apps > Парсеры" - часто
-                    # даёт более точный сигнал, чем свободный текст заголовка)
-                    if matches_keywords(f"{title} {category_text}"):
-                        notify("Kwork (почта)", title, category_text, link)
+            if is_kwork_direct_mail(subject):
+                handle_kwork_direct(seen, subject, body)
             else:
-                # Запасной вариант - вдруг Kwork поменяет вёрстку письма и
-                # ссылки не найдутся. Тогда как раньше - весь текст одним куском,
-                # лучше грубое уведомление, чем полная тишина.
-                full_text = strip_html(body)
-                match_text = full_text[:5000]
-                snippet = full_text[:400]
-                if matches_keywords(f"{subject_raw} {match_text}"):
-                    notify("Kwork (почта)", subject_raw, snippet, "")
+                handle_kwork_digest(seen, subject, body)
 
-        conn.close()
-        conn.logout()
     except Exception as e:
-        print(f"[kwork-mail] ошибка ({type(e).__name__}): {e}")
+        print("[kwork-mail] ошибка (%s): %s" % (type(e).__name__, e))
+    finally:
+        # Раньше соединение закрывалось только при удачном проходе: любая
+        # ошибка в середине оставляла висеть открытый IMAP-сокет.
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            try:
+                conn.logout()
+            except Exception:
+                pass
 
 
 # ---------------------- ЯНДЕКС КРАУД (через hh.ru API) ----------------------
@@ -584,51 +820,165 @@ def check_superjob(seen):
             notify("SuperJob", title, description, link)
 
 
-# ---------------------- ИСТОЧНИК 6: TELEGRAM-КАНАЛЫ (через RSS-мост) ----------------------
+# ---------------------- ИСТОЧНИК 6: TELEGRAM-КАНАЛЫ ----------------------
 #
-# У Telegram нет своего RSS для каналов, но есть открытые сервисы-мосты
-# (RSSHub и подобные), которые превращают ЛЮБОЙ публичный канал в обычную
-# RSS-ленту - ссылка вида https://rsshub.app/telegram/channel/ИМЯ_КАНАЛА.
-# Никаких логинов в Telegram, никаких токенов - тот же принцип, что FL.ru
-# и Weblancer, просто ещё один источник RSS.
+# У Telegram нет своего RSS для каналов. Раньше тут стоял сторонний мост
+# RSSHub (rsshub.app) - публичный бесплатный инстанс, который почти всегда
+# отдаёт 429/403 из чужого CI. То есть источник формально был, а работал
+# примерно никогда.
 #
-# TELEGRAM_CHANNELS ниже - это ДВА канала для примера (нашёл по запросу
-# "тг-каналы с заказами для фрилансеров"), сам их не вёл и не проверял
-# годами - если знаешь каналы получше, смело замени юзернеймы на свои,
-# формат тот же. Общий фильтр KEYWORDS применяется и здесь, так что даже
-# смешанный по тематике канал не завалит уведомлениями всем подряд.
+# Теперь читаем канал напрямую, без посредников: у КАЖДОГО публичного канала
+# есть веб-версия https://t.me/s/ИМЯ_КАНАЛА - обычная HTML-страница с
+# последними постами. Ни логина, ни токена, ни бота, ни стороннего сервиса.
+# Это та же страница, которую видит любой человек без Telegram.
+#
+# Каналы ниже - просто пример; смело меняй список на свои, формат тот же
+# (только имя канала, без "@" и без "t.me/"). Общий фильтр KEYWORDS
+# применяется и здесь, так что канал со смешанной тематикой не завалит
+# уведомлениями подряд.
 
 TELEGRAM_CHANNELS_ENABLED = True
-RSSHUB_BASE = "https://rsshub.app"  # если этот инстанс ляжет - есть и другие публичные, просто замени адрес
+TME_BASE = "https://t.me/s"
 TELEGRAM_CHANNELS = [
     "frilanser_vacansii",
     "distantsiya",
 ]
+
+# Максимум постов из одного канала за прогон - страница t.me/s отдаёт около
+# 20 последних, и если канал внезапно окажется новым (ничего не в seen),
+# без этого потолка можно получить сразу двадцать уведомлений подряд.
+TELEGRAM_MAX_POSTS_PER_RUN = 8
+
+
+def parse_tme_page(page, channel):
+    """Достаёт посты из HTML-страницы https://t.me/s/КАНАЛ.
+
+    Каждый пост обёрнут в <div class="tgme_widget_message_wrap ...">, внутри
+    есть data-post="канал/НОМЕР" и текст в div.tgme_widget_message_text.
+    """
+    posts = []
+    blocks = re.split(r'(?=<div class="tgme_widget_message_wrap)', page)
+    for block in blocks:
+        post_match = re.search(r'data-post="([^"/]+)/(\d+)"', block)
+        if not post_match:
+            continue
+        post_id = post_match.group(2)
+
+        text_match = re.search(
+            r'<div class="tgme_widget_message_text[^"]*"[^>]*>(.*?)'
+            r'(?:<div class="tgme_widget_message_footer'
+            r'|<span class="tgme_widget_message_meta'
+            r'|<div class="tgme_widget_message_bubble_end)',
+            block, flags=re.DOTALL,
+        )
+        if not text_match:
+            continue
+        text = strip_html(text_match.group(1), keep_newlines=True)
+        if not text:
+            continue
+
+        posts.append({
+            "id": post_id,
+            "text": text,
+            "link": "https://t.me/%s/%s" % (channel, post_id),
+        })
+    return posts
 
 
 def check_telegram_channels(seen):
     if not TELEGRAM_CHANNELS_ENABLED:
         return
     for channel in TELEGRAM_CHANNELS:
-        url = f"{RSSHUB_BASE}/telegram/channel/{channel}"
         try:
-            feed = fetch_feed(url)
+            page = fetch_url("%s/%s" % (TME_BASE, channel))
         except Exception as e:
-            print(f"[tg:{channel}] ошибка загрузки ленты ({type(e).__name__}): {e}")
+            print("[tg:%s] ошибка загрузки страницы (%s): %s" % (channel, type(e).__name__, e))
             continue
 
-        for entry in feed.entries:
-            uid = f"tg:{channel}:" + (entry.get("id") or entry.get("link", ""))
-            if uid == f"tg:{channel}:" or uid in seen:
+        posts = parse_tme_page(page, channel)
+        if not posts:
+            print("[tg:%s] постов не найдено - канал закрыт, переименован "
+                  "или Telegram поменял вёрстку" % channel)
+            continue
+
+        sent = 0
+        for post in posts:
+            uid = "tg:%s:%s" % (channel, post["id"])
+            if uid in seen:
                 continue
             seen.add(uid)
+            if sent >= TELEGRAM_MAX_POSTS_PER_RUN:
+                continue
+            if matches_keywords(post["text"]):
+                first_line = post["text"].split("\n", 1)[0][:100]
+                notify("Telegram: " + channel, first_line, "", post["link"],
+                       details=post["text"][:400])
+                sent += 1
 
-            title = strip_html(entry.get("title", ""))
-            description = strip_html(entry.get("summary", ""))
-            link = entry.get("link", "")
 
-            if matches_keywords(f"{title} {description}"):
-                notify(f"Telegram: {channel}", title or description[:80], description, link)
+# ---------------------- ИСТОЧНИК 7: HH.RU - ПРОЕКТНАЯ РАБОТА ----------------------
+#
+# НОВЫЙ источник. Отличается от ИСТОЧНИКА 4 не ключевыми словами, а типом
+# занятости: там ищутся обычные удалённые вакансии (наём в штат), а тут -
+# employment=project ("проектная работа") и employment=part ("частичная
+# занятость"). Это ровно та прослойка, где сидит не работодатель, а ЗАКАЗЧИК
+# с разовой задачей: сделать бота, скрипт, интеграцию, лендинг - то есть
+# работа, которую реально закрыть за вечер с Claude Code, а не выйти в офис.
+#
+# Тот же публичный API hh.ru, что уже используется выше: без токена, без
+# логина, без ключей - нужен только вежливый User-Agent.
+
+HH_PROJECT_ENABLED = True
+HH_PROJECT_PARAMS = {
+    "text": HH_SEARCH_TEXT,
+    "employment": ["project", "part"],
+    "per_page": 100,
+    "order_by": "publication_time",
+}
+
+
+def check_hh_project(seen):
+    if not HH_PROJECT_ENABLED:
+        return
+    data = hh_get(HH_PROJECT_PARAMS)
+    if data is None:
+        return
+
+    for item in data.get("items", []):
+        vac_id = item.get("id")
+        if not vac_id:
+            continue
+        uid = "hhproject:" + str(vac_id)
+        if uid in seen:
+            continue
+        seen.add(uid)
+
+        title = item.get("name", "Без названия")
+        employer = (item.get("employer") or {}).get("name", "")
+        snippet = item.get("snippet") or {}
+        description = strip_html(" ".join(
+            filter(None, [snippet.get("requirement"), snippet.get("responsibility")])
+        ))
+        link = item.get("alternate_url", "")
+
+        salary = item.get("salary") or {}
+        details = []
+        if salary.get("from") or salary.get("to"):
+            money = "💰 "
+            if salary.get("from"):
+                money += "от %s " % salary["from"]
+            if salary.get("to"):
+                money += "до %s " % salary["to"]
+            money += salary.get("currency") or ""
+            details.append(money.strip())
+        if employer:
+            details.append("👤 " + employer)
+        if description:
+            details.append(description[:300])
+
+        if matches_keywords(title + " " + description):
+            notify("hh.ru — проектная работа", title, "", link,
+                   details="\n".join(details))
 
 
 # ---------------------- ОДИН ЗАПУСК ----------------------
@@ -673,6 +1023,11 @@ def main():
             for item in (data or {}).get("items", []):
                 if item.get("id"):
                     seen.add("hhbroad:" + str(item["id"]))
+        if HH_PROJECT_ENABLED:
+            data = hh_get(HH_PROJECT_PARAMS)
+            for item in (data or {}).get("items", []):
+                if item.get("id"):
+                    seen.add("hhproject:" + str(item["id"]))
         if SUPERJOB_ENABLED and SUPERJOB_API_KEY:
             try:
                 r = requests.get(
@@ -692,19 +1047,17 @@ def main():
         if TELEGRAM_CHANNELS_ENABLED:
             for channel in TELEGRAM_CHANNELS:
                 try:
-                    feed = fetch_feed(f"{RSSHUB_BASE}/telegram/channel/{channel}")
-                    for entry in feed.entries:
-                        uid = f"tg:{channel}:" + (entry.get("id") or entry.get("link", ""))
-                        if uid != f"tg:{channel}:":
-                            seen.add(uid)
+                    for post in parse_tme_page(fetch_url(f"{TME_BASE}/{channel}"), channel):
+                        seen.add(f"tg:{channel}:{post['id']}")
                 except Exception as e:
                     print(f"[tg:{channel}] ошибка индексации ({type(e).__name__}): {e}")
         save_seen(seen)
         print("Проиндексировано. Дальше - только новое: заказы, письма Kwork, вакансии hh.ru.")
         return
 
-    for check_fn in (check_flru, check_kwork_mail, check_hh_crowd, check_weblancer,
-                      check_hh_broad, check_superjob, check_telegram_channels):
+    for check_fn in (check_kwork_mail, check_flru, check_hh_crowd, check_weblancer,
+                      check_hh_broad, check_hh_project, check_superjob,
+                      check_telegram_channels):
         print(f"-> {check_fn.__name__}")
         try:
             check_fn(seen)

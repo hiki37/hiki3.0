@@ -1,11 +1,18 @@
 name: Lead Monitor
 
-# Планирование теперь полностью на внешнем cron-job.org (встроенный schedule
-# у GitHub ненадёжен на бесплатном тарифе - подтвердили на практике).
-# Оставлен только workflow_dispatch: именно его дёргает cron-job.org, и он же
-# доступен для ручного запуска кнопкой Run workflow.
+# Основное планирование - на внешнем cron-job.org (встроенный schedule у
+# GitHub ненадёжен на бесплатном тарифе - подтвердили на практике). Именно
+# workflow_dispatch дёргает cron-job.org, он же доступен для ручного запуска
+# кнопкой Run workflow. Встроенный schedule оставлен только как страховка.
 on:
   workflow_dispatch:
+  # Подстраховка на случай, если cron-job.org отвалится (у него кончится
+  # бесплатный лимит, поменяется токен, упадёт сам сервис). Раз в час - это
+  # редко, поэтому даже ненадёжный встроенный schedule лишним не будет:
+  # concurrency ниже не даст двум прогонам столкнуться, а дедупликация
+  # по seen_leads.json - прислать один и тот же заказ дважды.
+  schedule:
+    - cron: '17 * * * *'
 
 permissions:
   contents: write
@@ -33,6 +40,9 @@ jobs:
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Run parser tests
+        run: python tests/test_kwork_parsing.py
 
       - name: Run lead monitor
         env:
