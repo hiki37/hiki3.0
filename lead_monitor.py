@@ -94,10 +94,38 @@ HH_SEARCH_TEXT = (
     'unity OR unreal OR "разработка игр" OR геймдев OR gamedev'
 )
 
-# Черновик отклика от Claude на каждый подходящий лид - платная фича (нужны
-# кредиты на console.anthropic.com), поэтому по умолчанию выключено.
-USE_AI_DRAFT = False
+# ==================== ЧЕРНОВИКИ ОТКЛИКОВ ====================
+#
+# К каждому подходящему лиду Claude пишет готовый текст отклика, и он приходит
+# в Telegram прямо под заказом. Тебе остаётся открыть ссылку, вставить и
+# отправить - секунд десять вместо "писать с нуля".
+#
+# Почему именно черновик, а не автоматическая отправка: ни у Kwork, ни у
+# Telegram-каналов нет API для отклика от лица исполнителя. Единственный
+# способ отправить - зайти под твоим логином и нажать кнопку скриптом, что
+# у Kwork прямо запрещено правилами и стоит коннектов (они платные). Цена
+# ошибки - блокировка аккаунта и сожжённые деньги, причём на том самом
+# аккаунте, ради которого всё и затевается. Поэтому отправляешь ты, руками.
+USE_AI_DRAFT = True
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+DRAFT_MODEL = "claude-opus-5"
+
+# Для каких источников готовить черновик (совпадение по подстроке в названии).
+# FL.ru намеренно не включён: там отклик платный, и жечь деньги на заготовку
+# к заказу, на который ты всё равно не ответишь, смысла нет.
+DRAFT_SOURCES = ("Kwork", "Telegram")
+
+# Генерация стоит денег на API, поэтому потолок за прогон.
+DRAFT_MAX_PER_RUN = 5
+
+# ВАЖНО: отредактируй под себя - именно отсюда Claude берёт, кто ты и что
+# умеешь. Чем конкретнее, тем меньше отклик похож на шаблон.
+ABOUT_ME = """
+Разработчик. Основное: Python, Telegram-боты, парсеры, интеграции по API,
+автоматизация рутины, скрипты обработки данных, несложные веб-задачи.
+Работаю с ИИ-инструментами, поэтому небольшие задачи закрываю быстро - часто
+в тот же день. Готов начать сразу и показать результат до оплаты.
+"""
 
 # ==================== ИСТОЧНИК 1: FL.RU (RSS) ====================
 
@@ -139,7 +167,7 @@ KWORK_SENDER_MATCH = "kwork"          # подстрока в адресе от�
 
 # ==================== ИСТОЧНИК 3: ЯНДЕКС КРАУД (через hh.ru) ====================
 
-HH_ENABLED = True
+HH_ENABLED = False   # выключено: hh.ru отвечает 403 на IP GitHub Actions
 
 # id работодателя "Яндекс Крауд" на hh.ru (страница: https://hh.ru/employer/9498112).
 # Если вдруг захочешь другого работодателя - открой его страницу на hh.ru,
@@ -161,7 +189,7 @@ HH_USER_AGENT = (
 # словам (HH_SEARCH_TEXT выше) сразу у ВСЕХ работодателей на hh.ru, с упором
 # на проектную/удалённую занятость - это ближе всего к разовым заказам,
 # а не к постоянному найму. Источник расширяет охват без ввода новой биржи.
-HH_BROAD_ENABLED = True
+HH_BROAD_ENABLED = False   # выключено вместе с остальным hh.ru
 HH_BROAD_PARAMS = {
     "text": HH_SEARCH_TEXT,
     "schedule": "remote",       # удалённая работа - большинству фрилансеров это и нужно
@@ -231,6 +259,12 @@ def send_telegram(text):
     записан, значит второго шанса не будет. Поэтому три попытки с паузой, и
     небольшая пауза между обычными отправками, чтобы не упираться в лимит.
     """
+    # У Telegram жёсткий предел 4096 символов на сообщение: длинный пост из
+    # канала вместе с черновиком отклика легко его перебивает, и тогда
+    # приходит не усечённый текст, а ошибка 400 - то есть лид теряется.
+    if len(text) > 4000:
+        text = text[:4000] + "\n[...обрезано]"
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     for attempt in range(3):
         try:
@@ -252,26 +286,74 @@ def send_telegram(text):
     return False
 
 
-def generate_draft(title, description):
+_DRAFT_SYSTEM = """Ты пишешь отклики на заказы фриланс-бирж от лица исполнителя.
+
+Кто исполнитель:
+{about}
+
+Правила отклика:
+- По-русски, на "вы", 3-5 предложений, без воды и канцелярита.
+- Первая фраза - конкретно про ЭТУ задачу, а не "здравствуйте, готов выполнить".
+  Покажи, что прочитал условие: назови, что именно предстоит сделать.
+- Если из условия понятен подход - скажи в одну фразу, как будешь делать.
+- Ровно один уточняющий вопрос по сути задачи, в конце. Вопрос должен быть
+  такой, на который без ответа заказчика работу не начать.
+- Никаких выдуманных фактов: не приписывай себе проектов, кейсов, отзывов,
+  лет опыта и названий компаний, которых нет в описании исполнителя выше.
+- Не называй цену и не обещай срок в часах, если в заказе нет ни бюджета,
+  ни объёма. Если бюджет указан - можешь сказать, что он подходит.
+- Без эмодзи, без markdown, без подписи и без темы письма. Только текст,
+  который можно вставить в поле отклика как есть."""
+
+
+_draft_state = {"made": 0, "warned": False}
+
+
+def wants_draft(source):
+    if not USE_AI_DRAFT:
+        return False
+    return any(s.lower() in (source or "").lower() for s in DRAFT_SOURCES)
+
+
+def generate_draft(source, title, details, link):
+    """Готовый текст отклика на конкретный заказ. None, если не получилось."""
+    if not ANTHROPIC_API_KEY:
+        if not _draft_state["warned"]:
+            _draft_state["warned"] = True
+            print("[ai-draft] ANTHROPIC_API_KEY не задан - черновики не пишу. "
+                  "Ключ берётся на console.anthropic.com (это API-кредиты, "
+                  "подписка Claude тут не подходит) и кладётся в секрет "
+                  "ANTHROPIC_API_KEY репозитория.")
+        return None
+
+    if _draft_state["made"] >= DRAFT_MAX_PER_RUN:
+        return None
+
+    task = "Источник: %s\nЗаказ: %s" % (source, title)
+    if details:
+        task += "\nПодробности: %s" % details
+    if link:
+        task += "\nСсылка: %s" % link
+
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        prompt = (
-            "Заказ на фриланс-бирже.\n"
-            f"Название: {title}\nОписание: {description}\n\n"
-            "Напиши короткий (2-4 предложения) персональный отклик фрилансера "
-            "веб-разработчика на этот заказ. По-русски, без канцелярита, "
-            "по существу задачи, с уточняющим вопросом или сроком."
-        )
         resp = client.messages.create(
-            model="claude-sonnet-5",
-            max_tokens=300,
-            messages=[{"role": "user", "content": prompt}],
+            model=DRAFT_MODEL,
+            max_tokens=16000,
+            output_config={"effort": "low"},
+            system=_DRAFT_SYSTEM.format(about=ABOUT_ME.strip()),
+            messages=[{"role": "user", "content": task}],
         )
-        return resp.content[0].text.strip()
     except Exception as e:
-        print(f"[ai-draft] ошибка генерации: {e}")
+        print("[ai-draft] ошибка генерации (%s): %s" % (type(e).__name__, e))
         return None
+
+    text = "".join(b.text for b in resp.content if b.type == "text").strip()
+    if not text:
+        return None
+    _draft_state["made"] += 1
+    return text
 
 
 # Предохранитель от лавины. Если источник вдруг отдаст сразу сотню новых
@@ -294,10 +376,10 @@ def notify(source, title, description, link, details=None):
     if link:
         msg += f"\n\n🔗 {link}"
 
-    if USE_AI_DRAFT and (title or description):
-        draft = generate_draft(title, description)
+    if wants_draft(source) and (title or body):
+        draft = generate_draft(source, title, body, link)
         if draft:
-            msg += f"\n\n✍️ Черновик отклика:\n{draft}"
+            msg += "\n\n" + "-" * 20 + "\n✍️ ЧЕРНОВИК ОТКЛИКА (скопируй, проверь, отправь):\n\n" + draft
 
     if _notify_state["sent"] >= MAX_NOTIFICATIONS_PER_RUN:
         _notify_state["skipped"] += 1
@@ -990,7 +1072,7 @@ def check_telegram_channels(seen):
 # Тот же публичный API hh.ru, что уже используется выше: без токена, без
 # логина, без ключей - нужен только вежливый User-Agent.
 
-HH_PROJECT_ENABLED = True
+HH_PROJECT_ENABLED = False   # выключено вместе с остальным hh.ru
 HH_PROJECT_PARAMS = {
     "text": HH_SEARCH_TEXT,
     "employment": ["project", "part"],
@@ -1127,6 +1209,8 @@ def main():
             print(f"[main] ошибка в {check_fn.__name__}: {e}")
 
     save_seen(seen)
+    if _draft_state["made"]:
+        print(f"[ai-draft] написано черновиков: {_draft_state['made']}")
     if _notify_state["skipped"]:
         print(f"[!] отправлено {_notify_state['sent']}, отброшено по потолку "
               f"{_notify_state['skipped']}. Они уже в seen и повторно не придут.")
