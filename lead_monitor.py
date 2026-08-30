@@ -1441,25 +1441,41 @@ def hn_algolia_get(path, params):
         return None
 
 
+# Тред выходит раз в месяц, поэтому окно в 75 дней гарантированно накрывает
+# текущий и предыдущий - и при этом отсекает архив за годы.
+HN_THREAD_MAX_AGE_DAYS = 75
+
+
 def find_hn_freelance_thread():
-    """Находит самый свежий месячный тред 'Freelancer? Seeking freelancer?'."""
-    data = hn_algolia_get("/search", {
-        "tags": "story", "query": HN_THREAD_QUERY, "hitsPerPage": 10,
+    """Находит АКТУАЛЬНЫЙ месячный тред 'Freelancer? Seeking freelancer?'.
+
+    Важно: ищем через /search_by_date, а не через /search. Обычный /search
+    сортирует по релевантности, и первый боевой прогон из-за этого прицепился
+    к треду за февраль 2020 года - заказчики оттуда искали исполнителя шесть
+    лет назад. search_by_date отдаёт свежее первым, а numericFilters режет
+    всё старше окна, чтобы такое не повторилось даже случайно.
+    """
+    oldest = int(time.time()) - HN_THREAD_MAX_AGE_DAYS * 24 * 3600
+    data = hn_algolia_get("/search_by_date", {
+        "tags": "story",
+        "query": HN_THREAD_QUERY,
+        "hitsPerPage": 20,
+        "numericFilters": "created_at_i>%d" % oldest,
     })
     if not data:
         return None, None
-    best = None
+
     for hit in data.get("hits", []):
         title = (hit.get("title") or "").lower()
         # именно тред про поиск фрилансера, а не "Who wants to be hired"
         if "seeking freelancer" not in title:
             continue
-        if best is None or (hit.get("created_at_i") or 0) > (best.get("created_at_i") or 0):
-            best = hit
-    if best is None:
-        print("[hn] тред 'Seeking freelancer' не найден")
-        return None, None
-    return best.get("objectID"), best.get("title")
+        return hit.get("objectID"), hit.get("title")
+
+    print("[hn] свежий тред 'Seeking freelancer' за последние %d дней не найден "
+          "- возможно, в этом месяце его ещё не опубликовали"
+          % HN_THREAD_MAX_AGE_DAYS)
+    return None, None
 
 
 def check_hn_freelance(seen):

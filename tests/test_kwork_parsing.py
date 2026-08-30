@@ -247,8 +247,9 @@ hits = [
 ]
 sent[:] = []
 lm.hn_algolia_get = lambda path, params: (
-    {"hits": [{"objectID": "999", "title": "Ask HN: Freelancer? Seeking freelancer? (August 2026)",
-               "created_at_i": 1}]} if path == "/search" else {"hits": hits})
+    {"hits": [{"objectID": "999",
+               "title": "Ask HN: Freelancer? Seeking freelancer? (August 2026)"}]}
+    if params.get("tags") == "story" else {"hits": hits})
 lm.check_hn_freelance(set())
 check(len(sent) == 1, "отправлен только заказчик, не соискатель (получено %d)" % len(sent))
 if sent:
@@ -294,6 +295,32 @@ from_hn = sum(1 for m in sent if "Hacker News" in m)
 check(from_remoteok <= lm.MAX_NOTIFICATIONS_PER_SOURCE,
       "RemoteOK ограничен %d (отправлено %d)" % (lm.MAX_NOTIFICATIONS_PER_SOURCE, from_remoteok))
 check(from_hn == 3, "лиды Hacker News дошли, несмотря на поток RemoteOK (дошло %d)" % from_hn)
+
+print("\n20. HN берёт свежий тред, а не архивный (регрессия из боевого прогона)")
+calls = []
+def fake_hn(path, params):
+    calls.append((path, dict(params)))
+    if path == "/search_by_date" and params.get("tags") == "story":
+        # search_by_date отдаёт свежее первым
+        return {"hits": [
+            {"objectID": "new", "title": "Ask HN: Freelancer? Seeking Freelancer? (August 2026)"},
+            {"objectID": "old", "title": "Ask HN: Freelancer? Seeking Freelancer? (February 2020)"},
+        ]}
+    return {"hits": []}
+lm.hn_algolia_get = fake_hn
+thread_id, thread_title = lm.find_hn_freelance_thread()
+check(thread_id == "new", "взят свежий тред (получен %r)" % thread_title)
+story_call = [c for c in calls if c[1].get("tags") == "story"][0]
+check(story_call[0] == "/search_by_date",
+      "поиск идёт по дате, а не по релевантности (было %s)" % story_call[0])
+check("created_at_i>" in story_call[1].get("numericFilters", ""),
+      "архив старше окна отсечён фильтром по дате")
+
+calls[:] = []
+lm.hn_algolia_get = lambda path, params: {"hits": [
+    {"objectID": "x", "title": "Ask HN: Who wants to be hired? (August 2026)"}]}
+thread_id, _ = lm.find_hn_freelance_thread()
+check(thread_id is None, "тред 'Who wants to be hired' не принят за нужный")
 
 print("\n" + "=" * 60)
 if failures:
