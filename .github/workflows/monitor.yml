@@ -53,6 +53,7 @@ jobs:
           IMAP_USER: ${{ secrets.IMAP_USER }}
           IMAP_PASSWORD: ${{ secrets.IMAP_PASSWORD }}
           SUPERJOB_API_KEY: ${{ secrets.SUPERJOB_API_KEY }}
+          HH_CONTACT: ${{ secrets.HH_CONTACT }}
         run: python lead_monitor.py
 
       - name: Save seen-leads state back to the repo

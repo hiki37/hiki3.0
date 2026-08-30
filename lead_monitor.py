@@ -104,11 +104,17 @@ FLRU_ENABLED = True
 
 # Список категорий FL.ru, которые проверяем (полный список категорий сайта
 # смотри внизу страницы https://www.fl.ru/projects/, кнопка "RSS"):
-#   5/37 -> Программирование > Веб-программирование
-#   2    -> Разработка сайтов (отдельная категория, раньше вообще не была подключена)
+#   5    -> Программирование ЦЕЛИКОМ. Раньше тут была только подкатегория
+#           37 (веб-программирование), из-за чего мимо проходили боты,
+#           скрипты, парсеры, десктоп и мобильная разработка - то есть ровно
+#           те разовые задачи, которые быстрее всего закрываются.
+#   2    -> Разработка сайтов (отдельная категория)
 #   16   -> Разработка игр
+#
+# По логам GitHub Actions FL.ru - единственный источник, который стабильно
+# отдаёт лиды (hh.ru отвечает 403, rsshub лежит), поэтому расширяем именно его.
 FLRU_RSS_URLS = [
-    "https://www.fl.ru/rss/all.xml?category=5&subcategory=37",
+    "https://www.fl.ru/rss/all.xml?category=5",
     "https://www.fl.ru/rss/all.xml?category=2",
     "https://www.fl.ru/rss/all.xml?category=16",
 ]
@@ -139,9 +145,14 @@ HH_ENABLED = True
 # id будет в адресной строке.
 HH_EMPLOYER_ID = "9498112"
 
-# Публичный API hh.ru не требует токена, но просит представиться в User-Agent.
-# Можно вписать сюда свою почту - это просто вежливость, не обязательно.
-HH_USER_AGENT = "lead-monitor-personal-script/1.0"
+# Публичный API hh.ru не требует токена, но требует представиться в
+# User-Agent, причём хочет видеть там контакт. Безымянный User-Agent - одна
+# из причин, по которой hh.ru отвечает 403. Свою почту в код не зашиваем:
+# задай секрет HH_CONTACT (например, почту) - он подставится в User-Agent.
+HH_CONTACT = os.environ.get("HH_CONTACT", "")
+HH_USER_AGENT = (
+    "lead-monitor/1.0 (%s)" % HH_CONTACT if HH_CONTACT else "lead-monitor/1.0"
+)
 
 # ==================== ИСТОЧНИК 4: HH.RU - ШИРОКИЙ ПОИСК ====================
 
@@ -700,6 +711,14 @@ def hh_get(params):
             headers={"User-Agent": HH_USER_AGENT},
             timeout=15,
         )
+        if r.status_code == 403:
+            print("[hh.ru] HTTP 403 forbidden. Чаще всего это значит, что hh.ru "
+                  "блокирует IP-адреса дата-центров, а GitHub Actions работает "
+                  "именно с таких. Помогает либо секрет HH_CONTACT в User-Agent, "
+                  "либо запуск монитора не из GitHub Actions. Если 403 держится "
+                  "постоянно - просто выключи HH_ENABLED/HH_BROAD_ENABLED/"
+                  "HH_PROJECT_ENABLED, чтобы не засорять лог.")
+            return None
         if r.status_code >= 400:
             print(f"[hh.ru] HTTP {r.status_code}: {r.text[:300]}")
             return None
