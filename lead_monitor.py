@@ -39,6 +39,7 @@
 
 import email
 import html as html_module
+import time
 import imaplib
 import json
 import os
@@ -223,12 +224,32 @@ def matches_keywords(text):
 
 
 def send_telegram(text):
+    """Отправка с повторами.
+
+    При очереди сообщений подряд Telegram рвёт соединение ("Connection reset
+    by peer") или отвечает 429. Без повтора лид просто терялся: в seen он уже
+    записан, значит второго шанса не будет. Поэтому три попытки с паузой, и
+    небольшая пауза между обычными отправками, чтобы не упираться в лимит.
+    """
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    try:
-        r = requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=10)
-        r.raise_for_status()
-    except Exception as e:
-        print(f"[telegram] ошибка отправки: {e}")
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=15
+            )
+            if r.status_code == 429:
+                wait = int((r.json().get("parameters") or {}).get("retry_after", 3))
+                print(f"[telegram] лимит, жду {wait}с")
+                time.sleep(min(wait, 30))
+                continue
+            r.raise_for_status()
+            time.sleep(0.5)
+            return True
+        except Exception as e:
+            print(f"[telegram] попытка {attempt + 1}/3 не удалась: {e}")
+            time.sleep(2 * (attempt + 1))
+    print("[telegram] сообщение отправить не удалось")
+    return False
 
 
 def generate_draft(title, description):
@@ -253,6 +274,15 @@ def generate_draft(title, description):
         return None
 
 
+# Предохранитель от лавины. Если источник вдруг отдаст сразу сотню новых
+# лидов (так бывает при расширении категории или при первом запуске нового
+# источника), без потолка бот высыпет сотню сообщений подряд и Telegram его
+# просто затротлит. Всё, что сверх потолка, всё равно попадает в seen - то
+# есть повторно не придёт, а в логе будет видно, сколько было отброшено.
+MAX_NOTIFICATIONS_PER_RUN = 15
+_notify_state = {"sent": 0, "skipped": 0}
+
+
 def notify(source, title, description, link, details=None):
     """details - уже собранный текст уведомления. Если он задан, description
     не используется: источник сам решил, что и как показывать (у Kwork,
@@ -269,7 +299,14 @@ def notify(source, title, description, link, details=None):
         if draft:
             msg += f"\n\n✍️ Черновик отклика:\n{draft}"
 
+    if _notify_state["sent"] >= MAX_NOTIFICATIONS_PER_RUN:
+        _notify_state["skipped"] += 1
+        print(f"[~] потолок {MAX_NOTIFICATIONS_PER_RUN} за прогон, "
+              f"не отправляю: {source}: {title}")
+        return
+
     send_telegram(msg)
+    _notify_state["sent"] += 1
     print(f"[+] {source}: {title}")
 
 
@@ -860,7 +897,9 @@ TELEGRAM_CHANNELS_ENABLED = True
 TME_BASE = "https://t.me/s"
 TELEGRAM_CHANNELS = [
     "frilanser_vacansii",
-    "distantsiya",
+    # "distantsiya" убран: по логам страница отдаётся, но постов в ней нет -
+    # канал закрыт, переименован или стал приватным. Добавляй сюда свои,
+    # формат тот же: только имя канала, без "@" и без "t.me/".
 ]
 
 # Максимум постов из одного канала за прогон - страница t.me/s отдаёт около
@@ -928,7 +967,11 @@ def check_telegram_channels(seen):
             seen.add(uid)
             if sent >= TELEGRAM_MAX_POSTS_PER_RUN:
                 continue
-            if matches_keywords(post["text"]):
+            # Матчим только начало поста (заголовок вакансии/заказа), а не
+            # весь текст: в подвале поста почти всегда есть слова вроде
+            # "сайт" и "разработка" из описания компании, из-за чего мимо
+            # фильтра проезжали "Мерч-дизайнер" и "Ассистент SMM-менеджера".
+            if matches_keywords(post["text"][:200]):
                 first_line = post["text"].split("\n", 1)[0][:100]
                 notify("Telegram: " + channel, first_line, "", post["link"],
                        details=post["text"][:400])
@@ -1084,6 +1127,9 @@ def main():
             print(f"[main] ошибка в {check_fn.__name__}: {e}")
 
     save_seen(seen)
+    if _notify_state["skipped"]:
+        print(f"[!] отправлено {_notify_state['sent']}, отброшено по потолку "
+              f"{_notify_state['skipped']}. Они уже в seen и повторно не придут.")
     print(f"Проверка завершена. Всего в памяти: {len(seen)}.")
 
 
