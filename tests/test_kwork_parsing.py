@@ -464,6 +464,46 @@ check(lm.notify("Kwork", "Тест", "", "") is True, "notify сообщает �
 lm._notify_state["by_source"]["Kwork"] = lm.MAX_NOTIFICATIONS_PER_SOURCE
 check(lm.notify("Kwork", "Тест2", "", "") is False, "и о том, что упёрся в потолок")
 
+print("\n29. Отличаем живого человека от рассылки")
+# рассылки и роботы - настоящие отправители из ящика
+robots = [
+    ("no_reply@free-lance.ru", "List-Unsubscribe: <https://fl.ru/unsub>\n"),
+    ("collection@avito.ru", ""),
+    ("notifications@github.com", ""),
+    ("hello@plus.yandex.ru", ""),
+    ("no-reply@email.claude.com", ""),
+    ("news@kwork.ru", ""),
+    ("someone@newsletter.example.org", "Precedence: bulk\n"),
+    ("robot@anywhere.com", "Auto-Submitted: auto-replied\n"),
+]
+for sender, headers in robots:
+    check(lm.looks_like_robot_mail(sender, headers), "робот отсеян: %s" % sender)
+
+humans = [
+    ("Sarah Chen <sarah@acmelabs.io>", "Subject: Re: your message\n"),
+    ("vladimir@mail.ru", ""),
+    ("john.doe@gmail.com", "Subject: About the scraper\n"),
+    ("Мария <maria@yandex.ru>", ""),   # обычный человек с Яндекс-почты
+]
+for sender, headers in humans:
+    check(not lm.looks_like_robot_mail(sender, headers), "человек пропущен: %s" % sender)
+
+print("\n30. Ответ живого человека приходит громко и без фильтра слов")
+sent[:] = []
+lm._notify_state["sent"] = 0
+lm._notify_state["by_source"] = {}
+reply_text = "Hi! Yes, still looking. Can you do it by next Friday?"
+check(not lm.matches_keywords(reply_text), "по ключевым словам такой ответ НЕ проходит")
+lm.notify("Личное письмо ⚡ ТЕБЕ ОТВЕТИЛИ", "Re: your message", "", "",
+          details="От: Sarah Chen <sarah@acmelabs.io>\n\n" + reply_text)
+check(len(sent) == 1, "уведомление всё равно отправлено")
+if sent:
+    print("  --- как это придёт ---")
+    for line in sent[0].splitlines():
+        print("  | " + line)
+    check("ТЕБЕ ОТВЕТИЛИ" in sent[0], "видно, что это ответ, а не очередной лид")
+    check("sarah@acmelabs.io" in sent[0], "отправитель на месте")
+
 print("\n" + "=" * 60)
 if failures:
     print("ПРОВАЛЕНО проверок: %d" % len(failures))

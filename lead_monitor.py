@@ -1201,6 +1201,124 @@ def check_kwork_mail(seen):
                 pass
 
 
+# ---------------------- ЛИЧНЫЕ ПИСЬМА: ТЕБЕ ОТВЕТИЛИ ----------------------
+#
+# Дыра, которая ломала всю автоматизацию. Бот читал в ящике ТОЛЬКО письма от
+# Kwork, а всё остальное игнорировал. То есть если заказчик с Hacker News
+# отвечал на твоё письмо - бот молчал, и ответ лежал в почте, пока ты сам
+# туда не заглянешь. Искать лиды круглосуточно и при этом проспать ответ
+# живого человека - худшее, что может делать такой бот.
+#
+# Теперь любое ПИСЬМО ОТ ЖИВОГО ЧЕЛОВЕКА приходит в Telegram отдельным
+# громким уведомлением, мимо всех фильтров по ключевым словам.
+
+PERSONAL_MAIL_ENABLED = True
+
+# Рассылки и роботы. Живой человек так себя не ведёт.
+_ROBOT_SENDER_MARKERS = ("noreply", "no-reply", "no_reply", "donotreply",
+                         "do-not-reply", "notifications", "notification@",
+                         "mailer-daemon", "postmaster", "bounce", "newsletter",
+                         "mailings", "info@kwork.ru", "news@kwork.ru")
+
+# Сервисы, чьи письма никогда не являются заказчиком.
+_SERVICE_DOMAINS = ("kwork.ru", "avito.ru", "free-lance.ru", "fl.ru",
+                    "github.com", "ggsel.com", "ggsel.net", "claude.com",
+                    "anthropic.com", "plus.yandex.ru", "google.com",
+                    "youtube.com", "apple.com", "telegram.org")
+
+
+def looks_like_robot_mail(sender, headers_text):
+    """Отличает рассылку/робота от письма живого человека.
+
+    Главный признак - заголовок List-Unsubscribe: он есть практически у любой
+    легальной рассылки и почти никогда у обычного письма. Плюс Auto-Submitted
+    и Precedence, которыми помечают автоответы и списки рассылки.
+    """
+    low_headers = (headers_text or "").lower()
+    for marker in ("list-unsubscribe:", "auto-submitted: auto",
+                   "precedence: bulk", "precedence: list",
+                   "precedence: junk", "x-auto-response-suppress:"):
+        if marker in low_headers:
+            return True
+
+    low_sender = (sender or "").lower()
+    if any(marker in low_sender for marker in _ROBOT_SENDER_MARKERS):
+        return True
+    if any(domain in low_sender for domain in _SERVICE_DOMAINS):
+        return True
+    return False
+
+
+def check_personal_mail(seen):
+    """Письмо от живого человека -> громкое уведомление в Telegram."""
+    if not PERSONAL_MAIL_ENABLED:
+        return
+    if not IMAP_USER or not IMAP_PASSWORD:
+        return
+
+    conn = None
+    try:
+        conn = imaplib.IMAP4_SSL(IMAP_HOST, timeout=20)
+        conn.login(IMAP_USER, IMAP_PASSWORD)
+        conn.select(IMAP_FOLDER)
+
+        since = imap_date(datetime.now() - timedelta(days=1))
+        status, data = conn.search(None, '(SINCE "%s")' % since)
+        if status != "OK" or not data or data[0] is None:
+            return
+
+        for num in data[0].split():
+            # Сначала только заголовки - они дешёвые. Тело письма качаем
+            # лишь у тех, кто прошёл отсев, иначе за сутки скачивали бы
+            # десятки рассылок целиком ради пары живых писем.
+            status, head_data = conn.fetch(
+                num,
+                "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT MESSAGE-ID "
+                "LIST-UNSUBSCRIBE AUTO-SUBMITTED PRECEDENCE "
+                "X-AUTO-RESPONSE-SUPPRESS)])",
+            )
+            if status != "OK" or not head_data or not head_data[0]:
+                continue
+
+            raw_headers = head_data[0][1].decode("utf-8", errors="ignore")
+            head_msg = email.message_from_string(raw_headers)
+            sender = decode_mime(head_msg.get("From", ""))
+            subject = decode_mime(head_msg.get("Subject", ""))
+            message_id = head_msg.get("Message-ID") or ("num:" + num.decode())
+
+            uid = "mail:" + message_id
+            if uid in seen:
+                continue
+
+            if looks_like_robot_mail(sender, raw_headers):
+                seen.add(uid)      # рассылку второй раз не разбираем
+                continue
+
+            seen.add(uid)
+
+            status, body_data = conn.fetch(num, "(BODY.PEEK[])")
+            body = ""
+            if status == "OK" and body_data and body_data[0]:
+                body = get_email_body(email.message_from_bytes(body_data[0][1]))
+            text = strip_html(body, keep_newlines=True)[:600]
+
+            notify("Личное письмо ⚡ ТЕБЕ ОТВЕТИЛИ", subject or "(без темы)",
+                   "", "", details="От: %s\n\n%s" % (sender, text))
+
+    except Exception as e:
+        print("[mail] ошибка (%s): %s" % (type(e).__name__, e))
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            try:
+                conn.logout()
+            except Exception:
+                pass
+
+
 # ---------------------- ЯНДЕКС КРАУД (через hh.ru API) ----------------------
 
 def hh_get(params):
@@ -1938,7 +2056,8 @@ def main():
         print("Проиндексировано. Дальше - только новое: заказы, письма Kwork, вакансии hh.ru.")
         return
 
-    for check_fn in (check_kwork_mail, check_flru, check_hn_freelance,
+    for check_fn in (check_personal_mail, check_kwork_mail, check_flru,
+                      check_hn_freelance,
                       check_wwr, check_remoteok, check_osm_no_website,
                       check_hh_crowd, check_weblancer, check_hh_broad,
                       check_hh_project, check_superjob,
