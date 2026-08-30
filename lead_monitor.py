@@ -760,17 +760,18 @@ def notify(source, title, description, link, details=None):
 
     if _notify_state["sent"] >= MAX_NOTIFICATIONS_PER_RUN:
         _notify_state["skipped"] += 1
-        return
+        return False
 
     from_source = _notify_state["by_source"].get(source, 0)
     if from_source >= MAX_NOTIFICATIONS_PER_SOURCE:
         _notify_state["skipped"] += 1
-        return
+        return False
 
     send_telegram(msg)
     _notify_state["sent"] += 1
     _notify_state["by_source"][source] = _notify_state["by_source"].get(source, 0) + 1
     print(f"[+] {source}: {title}")
+    return True
 
 
 USER_AGENT = "lead-monitor-personal-script/1.0"
@@ -1836,7 +1837,6 @@ def check_osm_no_website(seen):
         uid = "osm:%s/%s" % (element.get("type"), element.get("id"))
         if uid in seen:
             continue
-        seen.add(uid)
 
         category = tags.get("amenity") or tags.get("shop") or ""
         street = " ".join(filter(None, [tags.get("addr:street"),
@@ -1850,8 +1850,18 @@ def check_osm_no_website(seen):
 
         link = "https://www.openstreetmap.org/%s/%s" % (element.get("type"),
                                                         element.get("id"))
-        notify(source, "%s — %s" % (name, city["name"]), "", link,
-               details="\n".join(details))
+        # Помечаем просмотренным ТОЛЬКО то, что реально ушло в Telegram.
+        # У остальных источников наоборот - там лид протухает сам (вакансию
+        # закрыли, заказ разобрали), и второй раз он не нужен. А кафе без
+        # сайта останется без сайта и через месяц: если списать со счёта всё,
+        # что не влезло в потолок, мы сожжём полсотни живых контактов за
+        # прогон. Не влезло - вернёмся к нему на следующем круге по городам.
+        if not notify(source, "%s — %s" % (name, city["name"]), "", link,
+                      details="\n".join(details)):
+            print("[osm] потолок выбран, остальные %s оставляю на следующий круг"
+                  % city["name"])
+            return
+        seen.add(uid)
 
 
 # ---------------------- ОДИН ЗАПУСК ----------------------

@@ -424,6 +424,46 @@ check(seen_cities[0] != seen_cities[1], "соседние прогоны бер�
 print("\n26. Подпись черновика различает отклик и холодное обращение")
 check("ЗВОНКА / СООБЩЕНИЯ" in sent[0], "у карт - звонок/сообщение, не отклик")
 
+print("\n27. Карты: лиды сверх потолка НЕ сжигаются")
+many = {"elements": [
+    {"type": "node", "id": 1000 + i, "tags": {
+        "name": "Кафе %d" % i, "amenity": "cafe", "phone": "+7 495 000-00-%02d" % i}}
+    for i in range(20)
+]}
+lm.overpass_get = lambda query: many
+lm.pick_osm_city = lambda: {"name": "Москва", "lang": "ru",
+                            "bbox": (55.55, 37.35, 55.92, 37.85)}
+
+seen_store = set()
+lm._notify_state["sent"] = 0
+lm._notify_state["skipped"] = 0
+lm._notify_state["by_source"] = {}
+sent[:] = []
+lm.check_osm_no_website(seen_store)
+first_round = len(sent)
+check(first_round == lm.MAX_NOTIFICATIONS_PER_SOURCE,
+      "за прогон ушло ровно %d (получено %d)" % (lm.MAX_NOTIFICATIONS_PER_SOURCE, first_round))
+check(len(seen_store) == first_round,
+      "в seen попали ТОЛЬКО отправленные: %d из 20" % len(seen_store))
+
+# следующий круг по тому же городу - должны прийти СЛЕДУЮЩИЕ, а не те же
+lm._notify_state["sent"] = 0
+lm._notify_state["skipped"] = 0
+lm._notify_state["by_source"] = {}
+sent[:] = []
+lm.check_osm_no_website(seen_store)
+check(len(sent) == lm.MAX_NOTIFICATIONS_PER_SOURCE, "на втором круге снова 5")
+check("Кафе 5" in sent[0], "пришли следующие по списку, а не повтор (%s)"
+      % sent[0].splitlines()[2])
+check(len(seen_store) == first_round * 2, "накопилось 10 просмотренных")
+
+print("\n28. У остальных источников поведение не изменилось")
+lm._notify_state["sent"] = 0
+lm._notify_state["by_source"] = {}
+check(lm.notify("Kwork", "Тест", "", "") is True, "notify сообщает об отправке")
+lm._notify_state["by_source"]["Kwork"] = lm.MAX_NOTIFICATIONS_PER_SOURCE
+check(lm.notify("Kwork", "Тест2", "", "") is False, "и о том, что упёрся в потолок")
+
 print("\n" + "=" * 60)
 if failures:
     print("ПРОВАЛЕНО проверок: %d" % len(failures))
