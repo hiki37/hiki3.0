@@ -255,6 +255,46 @@ if sent:
     check("news.ycombinator.com/item?id=1" in sent[0], "ссылка на комментарий заказчика")
     check("acme" in sent[0], "автор указан")
 
+print("\n17. Англоязычный фильтр не пропускает мусор (регрессия из боевого прогона)")
+# Ровно эти вакансии RemoteOK прислал в Telegram, пока фильтр был дырявым
+junk = ["Kitchen Porter", "Mail Sorter", "Gardener", "Ramp Attendant",
+        "Removalist Offsider", "Cook FT Northpoint", "Retail Store Associate",
+        "Bell Captain", "Quantity Surveyor", "Post Office Manager",
+        "Store Manager", "Vehicle Progressor", "Joiner", "Lead Estimator"]
+for title in junk:
+    check(not lm.matches_keywords(title, lm.KEYWORDS_EN), "отсеян: %s" % title)
+
+good = ["Senior Backend Engineer Build AI Agents", "Python Developer",
+        "Full Stack Engineer", "Need a web scraper for product data",
+        "Telegram bot developer", "Wordpress landing page fixes",
+        "LLM / prompt engineer for RAG app"]
+for title in good:
+    check(lm.matches_keywords(title, lm.KEYWORDS_EN), "пропущен: %s" % title)
+
+print("\n18. Короткие куски не ловятся внутри других слов")
+traps = [("Corporate capital markets analyst", "api в capital"),
+         ("Physical therapist assistant", "api в therapist"),
+         ("Employment laws specialist", "aws в laws"),
+         ("Warehouse storage operative", "rag в storage"),
+         ("Excellent customer service rep", "excel в excellent")]
+for text, why in traps:
+    check(not lm.matches_keywords(text, lm.KEYWORDS_EN), "не поймался %s" % why)
+
+print("\n19. Один источник не съедает весь лимит за прогон")
+lm._notify_state["sent"] = 0
+lm._notify_state["skipped"] = 0
+lm._notify_state["by_source"] = {}
+sent[:] = []
+for i in range(30):
+    lm.notify("RemoteOK", "Job %d" % i, "", "")
+for i in range(3):
+    lm.notify("Hacker News — Seeking freelancer", "Client %d" % i, "", "")
+from_remoteok = sum(1 for m in sent if "RemoteOK" in m)
+from_hn = sum(1 for m in sent if "Hacker News" in m)
+check(from_remoteok <= lm.MAX_NOTIFICATIONS_PER_SOURCE,
+      "RemoteOK ограничен %d (отправлено %d)" % (lm.MAX_NOTIFICATIONS_PER_SOURCE, from_remoteok))
+check(from_hn == 3, "лиды Hacker News дошли, несмотря на поток RemoteOK (дошло %d)" % from_hn)
+
 print("\n" + "=" * 60)
 if failures:
     print("ПРОВАЛЕНО проверок: %d" % len(failures))

@@ -415,19 +415,40 @@ def strip_html(text, keep_newlines=False):
 # Англоязычные источники фильтруются своим списком: русский список на них
 # почти не срабатывает (там нет ни "бот", ни "разработ"), а общий список из
 # двух языков сделал бы русские источники шумнее.
+# Список строго технический и без коротких обрывков. Два урока, оплаченных
+# боевым прогоном:
+#
+# 1. Слова про формат работы ("contract", "hourly", "part-time", "freelance")
+#    есть в описании ЛЮБОЙ вакансии, поэтому фильтр пропускал всё подряд -
+#    в Telegram уехали "Kitchen Porter", "Mail Sorter" и "Gardener".
+# 2. Короткие куски ловятся внутри других слов: "api" сидит в "capital" и
+#    "therapist", "aws" в "laws", "rag" в "storage" и "average", "excel" в
+#    "excellent". Поэтому здесь только цельные термины.
 KEYWORDS_EN = [
-    "python", "javascript", "typescript", "node", "react", "vue", "next.js",
-    "frontend", "backend", "full stack", "fullstack", "web developer",
-    "telegram bot", "discord bot", "chatbot", "bot ",
-    "scraper", "scraping", "crawler", "parser", "data extraction",
-    "automation", "automate", "script", "spreadsheet", "google sheets",
-    "integration", "api", "webhook", "crm", "zapier", "make.com",
-    "ai ", "llm", "gpt", "openai", "anthropic", "claude", "rag", "embedding",
-    "prompt engineer", "machine learning",
-    "landing page", "website", "webflow", "wordpress", "shopify",
-    "django", "flask", "fastapi", "postgres", "sql",
-    "docker", "devops", "aws", "deploy", "server setup",
-    "mvp", "prototype", "freelance", "contract", "part-time", "hourly",
+    # языки и стек
+    "python", "javascript", "typescript", "node.js", "nodejs", "react",
+    "vue.js", "next.js", "django", "flask", "fastapi", "postgres", "mysql",
+    "html", "css", "golang", " rust ",
+    # роли
+    "frontend", "front-end", "backend", "back-end", "full stack", "fullstack",
+    "web developer", "software engineer", "software developer",
+    # боты
+    "telegram bot", "discord bot", "slack bot", "chatbot", "chat bot",
+    # сбор данных
+    "scraper", "scraping", "crawler", "data extraction", "data pipeline",
+    # автоматизация
+    "automate", "automation script", "workflow automation", "spreadsheet",
+    "google sheets", "zapier", "make.com", "airtable",
+    # интеграции
+    "rest api", "api integration", "public api", "webhook", "crm integration",
+    # ИИ
+    "llm", "gpt-", "openai", "anthropic", "claude", "embedding",
+    "prompt engineer", "machine learning", "ai agent", "ai engineer",
+    "retrieval augmented",
+    # веб
+    "landing page", "wordpress", "webflow", "shopify", "web app",
+    # инфраструктура
+    "docker", "kubernetes", "devops", "terraform",
 ]
 
 # Источники, где всё по-английски: и фильтр, и черновик отклика.
@@ -617,7 +638,13 @@ def generate_draft(source, title, details, link):
 # просто затротлит. Всё, что сверх потолка, всё равно попадает в seen - то
 # есть повторно не придёт, а в логе будет видно, сколько было отброшено.
 MAX_NOTIFICATIONS_PER_RUN = 15
-_notify_state = {"sent": 0, "skipped": 0}
+
+# И потолок на ОДИН источник. Без него источник с самой длинной лентой
+# (RemoteOK отдаёт сотни вакансий за раз) выбирает общий лимит целиком, и
+# лиды с Kwork и Hacker News, которые идут следом, до тебя не доходят.
+MAX_NOTIFICATIONS_PER_SOURCE = 5
+
+_notify_state = {"sent": 0, "skipped": 0, "by_source": {}}
 
 
 def notify(source, title, description, link, details=None):
@@ -638,12 +665,16 @@ def notify(source, title, description, link, details=None):
 
     if _notify_state["sent"] >= MAX_NOTIFICATIONS_PER_RUN:
         _notify_state["skipped"] += 1
-        print(f"[~] потолок {MAX_NOTIFICATIONS_PER_RUN} за прогон, "
-              f"не отправляю: {source}: {title}")
+        return
+
+    from_source = _notify_state["by_source"].get(source, 0)
+    if from_source >= MAX_NOTIFICATIONS_PER_SOURCE:
+        _notify_state["skipped"] += 1
         return
 
     send_telegram(msg)
     _notify_state["sent"] += 1
+    _notify_state["by_source"][source] = _notify_state["by_source"].get(source, 0) + 1
     print(f"[+] {source}: {title}")
 
 
@@ -1518,7 +1549,7 @@ def check_wwr(seen):
             description = strip_html(entry.get("summary", ""))
             link = entry.get("link", "")
 
-            if matches_keywords(title + " " + description, KEYWORDS_EN):
+            if matches_keywords(title, KEYWORDS_EN):
                 notify("WeWorkRemotely", title, "", link, details=description[:400])
 
 
@@ -1562,7 +1593,10 @@ def check_remoteok(seen):
         link = item.get("url") or ""
         tags = " ".join(item.get("tags") or [])
 
-        if matches_keywords(" ".join([title, tags, description]), KEYWORDS_EN):
+        # Матчим ТОЛЬКО заголовок и теги. В описании вакансии всегда полно
+        # общих слов, из-за которых через фильтр проезжала любая вакансия,
+        # вплоть до "Kitchen Porter". Теги у RemoteOK - самый чистый сигнал.
+        if matches_keywords(" ".join([title, tags]), KEYWORDS_EN):
             details = []
             if company:
                 details.append("company: " + company)
