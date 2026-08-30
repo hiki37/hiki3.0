@@ -16,6 +16,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import lead_monitor as lm
 
+lm.pick_osm_city_original = lm.pick_osm_city   # до подмены в тестах
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 sent = []
 real_send_telegram = lm.send_telegram   # настоящая функция, для теста обрезки
@@ -356,6 +358,71 @@ check(en.startswith("Hi!"), "по-английски")
 print("  | " + en)
 
 check("вордпресс" not in ru.lower(), "общий шаблон про сайты не перебил специальный")
+
+print("\n23. Карты: бизнес без сайта")
+q = lm.build_osm_query((55.55, 37.35, 55.92, 37.85))
+check('[!"website"]' in q and '[!"contact:website"]' in q,
+      "запрос требует ОТСУТСТВИЯ сайта")
+check('["phone"]' in q and '["contact:phone"]' in q,
+      "телефон обязателен - иначе звонить некуда")
+check('55.55,37.35,55.92,37.85' in q, "рамка города подставлена")
+
+overpass_answer = {"elements": [
+    {"type": "node", "id": 111, "tags": {
+        "name": "Кофейня Ромашка", "amenity": "cafe", "phone": "+7 495 111-22-33",
+        "addr:street": "ул. Баумана", "addr:housenumber": "12"}},
+    {"type": "way", "id": 222, "tags": {          # без телефона - пропускаем
+        "name": "Бар без связи", "amenity": "bar"}},
+    {"type": "node", "id": 333, "tags": {          # без имени - пропускаем
+        "amenity": "cafe", "phone": "+7 495 999"}},
+]}
+lm.overpass_get = lambda query: overpass_answer
+lm.pick_osm_city = lambda: {"name": "Москва", "lang": "ru",
+                            "bbox": (55.55, 37.35, 55.92, 37.85)}
+lm._notify_state["sent"] = 0
+lm._notify_state["skipped"] = 0
+lm._notify_state["by_source"] = {}
+sent[:] = []
+lm.check_osm_no_website(set())
+check(len(sent) == 1, "отправлено только пригодное заведение (получено %d)" % len(sent))
+if sent:
+    print("  --- как это придёт ---")
+    for line in sent[0].splitlines():
+        print("  | " + line)
+    check("Кофейня Ромашка — Москва" in sent[0], "название и город")
+    check("+7 495 111-22-33" in sent[0], "телефон на месте")
+    check("openstreetmap.org/node/111" in sent[0], "ссылка на объект")
+    check("сайта у вас нет" in sent[0], "черновик - обращение, а не отклик на заказ")
+    check("Покажу рабочий результат до оплаты" not in sent[0],
+          "текст отклика на заказ сюда не подставился")
+
+print("\n24. Для американского города обращение по-английски")
+lm.pick_osm_city = lambda: {"name": "Austin", "lang": "en",
+                            "bbox": (30.15, -97.95, 30.45, -97.60)}
+lm._notify_state["by_source"] = {}
+lm._notify_state["sent"] = 0
+sent[:] = []
+lm.check_osm_no_website(set())
+check(sent and "don't have a website" in sent[0], "английское обращение")
+check(sent and "Здравствуйте" not in sent[0], "русского текста нет")
+
+print("\n25. Города обходятся по кругу, а не долбится один")
+import time as _time
+real_time = _time.time
+seen_cities = []
+try:
+    for hour in range(len(lm.OSM_CITIES) * 2):
+        _time.time = (lambda h: (lambda: h * 3600.0))(hour)
+        seen_cities.append(lm.pick_osm_city_original()["name"])
+finally:
+    _time.time = real_time
+check(len(set(seen_cities)) == len(lm.OSM_CITIES),
+      "за сутки обойдены все %d городов (уникальных %d)"
+      % (len(lm.OSM_CITIES), len(set(seen_cities))))
+check(seen_cities[0] != seen_cities[1], "соседние прогоны берут разные города")
+
+print("\n26. Подпись черновика различает отклик и холодное обращение")
+check("ЗВОНКА / СООБЩЕНИЯ" in sent[0], "у карт - звонок/сообщение, не отклик")
 
 print("\n" + "=" * 60)
 if failures:

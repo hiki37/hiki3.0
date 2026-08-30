@@ -124,7 +124,8 @@ DRAFT_MODEL = "claude-opus-5"
 # Для каких источников готовить черновик (совпадение по подстроке в названии).
 # FL.ru намеренно не включён: там отклик платный, и жечь деньги на заготовку
 # к заказу, на который ты всё равно не ответишь, смысла нет.
-DRAFT_SOURCES = ("Kwork", "Telegram", "Hacker News", "WeWorkRemotely", "RemoteOK")
+DRAFT_SOURCES = ("Kwork", "Telegram", "Hacker News", "WeWorkRemotely",
+                 "RemoteOK", "Карты", "Maps")
 
 # Потолок только для платного движка "ai" - шаблоны бесплатны и не считаются.
 DRAFT_MAX_PER_RUN = 5
@@ -307,6 +308,35 @@ DRAFT_FALLBACK_EN = {
 
 DRAFT_PROOF_EN = ("I'll show you it working before you pay anything.")
 
+# Бизнес с карт - случай наособицу. Тут никто ничего не заказывал: человек
+# просто работает, и у него нет сайта. Значит это не отклик, а первое
+# обращение, и оно должно быть коротким, вежливым и с понятным поводом
+# ("увидел, что сайта нет"), иначе это обычный спам. Писать такое надо
+# ПОШТУЧНО - в мессенджер или звонком, а не рассылкой по списку.
+DRAFT_OUTREACH_RU = (
+    "Здравствуйте! Нашёл вас в картах и заметил, что сайта у вас нет - только "
+    "телефон и адрес. Я делаю простые сайты-визитки под ключ: страница с "
+    "услугами и контактами, хостинг и домен подключаю сам, вам остаётся только "
+    "давать ссылку клиентам. Могу за свой счёт собрать черновик именно под вас "
+    "и показать - если не понравится, ничего не должны. Скажите, вам это "
+    "интересно или сайт вам сейчас не нужен?"
+)
+
+DRAFT_OUTREACH_EN = (
+    "Hi! I found you on the map and noticed you don't have a website yet - just "
+    "a phone number and an address. I build simple one-page sites end to end: "
+    "your services and contacts, with hosting and the domain wired up, so you "
+    "just hand people a link. Happy to put together a draft for your business "
+    "at my own cost so you can see it first - no obligation either way. Would "
+    "that be useful, or is a website not something you need right now?"
+)
+
+
+def is_maps_source(source):
+    low = (source or "").lower()
+    return "карты" in low or "maps" in low
+
+
 # Отдельный случай: покупатель написал лично. Это не отклик на заказ, а ответ
 # человеку, который уже ждёт, - и тон тут совсем другой.
 DRAFT_DIRECT_REPLY = (
@@ -472,7 +502,7 @@ KEYWORDS_EN = [
 ]
 
 # Источники, где всё по-английски: и фильтр, и черновик отклика.
-ENGLISH_SOURCES = ("Hacker News", "WeWorkRemotely", "RemoteOK")
+ENGLISH_SOURCES = ("Hacker News", "WeWorkRemotely", "RemoteOK", "Maps")
 
 
 def is_english_source(source):
@@ -572,6 +602,9 @@ def template_draft(source, title, details):
     """
     if is_direct_source(source):
         return DRAFT_DIRECT_REPLY
+
+    if is_maps_source(source):
+        return DRAFT_OUTREACH_EN if is_english_source(source) else DRAFT_OUTREACH_RU
 
     text = "%s %s" % (title or "", details or "")
 
@@ -717,7 +750,13 @@ def notify(source, title, description, link, details=None):
     if wants_draft(source) and (title or body):
         draft = build_draft(source, title, body, link)
         if draft:
-            msg += "\n\n" + "-" * 20 + "\n✍️ ЧЕРНОВИК ОТКЛИКА (скопируй, проверь, отправь):\n\n" + draft
+            # Для карт это не отклик на заказ, а первое обращение к человеку,
+            # который ничего не заказывал - и идти оно должно звонком или в
+            # мессенджер, поштучно. Подпись должна об этом напоминать.
+            label = ("✍️ ЧЕРНОВИК ЗВОНКА / СООБЩЕНИЯ (по одному, не рассылкой):"
+                     if is_maps_source(source)
+                     else "✍️ ЧЕРНОВИК ОТКЛИКА (скопируй, проверь, отправь):")
+            msg += "\n\n" + "-" * 20 + "\n" + label + "\n\n" + draft
 
     if _notify_state["sent"] >= MAX_NOTIFICATIONS_PER_RUN:
         _notify_state["skipped"] += 1
@@ -1679,6 +1718,142 @@ def check_remoteok(seen):
             notify("RemoteOK", title, "", link, details="\n".join(details))
 
 
+# ---------------------- ИСТОЧНИК 11: КАРТЫ (OSM) - БИЗНЕС БЕЗ САЙТА ----------------------
+#
+# Здесь принцип другой, чем во всех источниках выше. Там заказчик сам написал,
+# что ему нужен исполнитель. Здесь - никто ничего не просил: мы сами находим
+# бизнес, у которого В КАРТАХ НЕТ САЙТА, только телефон и адрес. Это и есть
+# повод обратиться, и одновременно то, что ты продаёшь: лендинг под ключ с
+# хостингом и доменом.
+#
+# Почему именно "без сайта", а не все подряд с карты: адрес с карты сам по
+# себе не лид, обращение к нему - спам. Отсутствие сайта - конкретная причина
+# написать конкретному человеку и конкретная вещь, которую можно сделать.
+#
+# ВАЖНО про канал: такие контакты берут ЗВОНКОМ или сообщением в мессенджер,
+# поштучно. Массовая рассылка по этому списку с личной почты угробит ящик и
+# ничего не принесёт.
+#
+# Данные - OpenStreetMap через Overpass API: открытые, без ключа, без
+# регистрации и без привязки карты.
+
+OSM_ENABLED = True
+OSM_ENDPOINTS = (
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",   # запасной инстанс
+)
+OSM_MAX_RESULTS = 60
+
+# Категории, которым сайт-визитка реально нужна и у которых есть бюджет.
+OSM_AMENITIES = ("cafe|restaurant|bar|fast_food|dentist|doctors|clinic|"
+                 "veterinary|driving_school|pharmacy")
+
+# Города обходятся по очереди - по одному за прогон, чтобы не долбить
+# бесплатный Overpass. Список правь свободно: bbox это (юг, запад, север,
+# восток), "lang" решает, на каком языке будет черновик обращения.
+OSM_CITIES = [
+    {"name": "Москва",           "lang": "ru", "bbox": (55.55, 37.35, 55.92, 37.85)},
+    {"name": "Санкт-Петербург",  "lang": "ru", "bbox": (59.80, 30.10, 60.09, 30.55)},
+    {"name": "Казань",           "lang": "ru", "bbox": (55.70, 48.98, 55.87, 49.28)},
+    {"name": "Екатеринбург",     "lang": "ru", "bbox": (56.75, 60.50, 56.92, 60.72)},
+    {"name": "Новосибирск",      "lang": "ru", "bbox": (54.95, 82.80, 55.13, 83.10)},
+    {"name": "New York",         "lang": "en", "bbox": (40.55, -74.05, 40.92, -73.70)},
+    {"name": "Los Angeles",      "lang": "en", "bbox": (33.90, -118.50, 34.20, -118.15)},
+    {"name": "Chicago",          "lang": "en", "bbox": (41.75, -87.85, 42.02, -87.55)},
+    {"name": "Austin",           "lang": "en", "bbox": (30.15, -97.95, 30.45, -97.60)},
+    {"name": "Miami",            "lang": "en", "bbox": (25.70, -80.30, 25.86, -80.13)},
+    {"name": "London",           "lang": "en", "bbox": (51.42, -0.25, 51.60, 0.02)},
+    {"name": "Berlin",           "lang": "en", "bbox": (52.42, 13.25, 52.58, 13.55)},
+]
+
+
+def pick_osm_city():
+    """Один город за прогон, по кругу - примерно раз в полсуток на город."""
+    if not OSM_CITIES:
+        return None
+    return OSM_CITIES[int(time.time() // 3600) % len(OSM_CITIES)]
+
+
+def build_osm_query(bbox):
+    """Overpass QL: с именем и телефоном, но БЕЗ сайта.
+
+    Телефон требуется на стороне сервера: без него лид бесполезен, звонить
+    некуда. Отдельные ветки для phone и contact:phone - в OSM встречаются оба
+    написания, а ИЛИ внутри одного фильтра Overpass не умеет.
+    """
+    box = "%s,%s,%s,%s" % bbox
+    parts = []
+    for selector in ('["amenity"~"^(%s)$"]' % OSM_AMENITIES, '["shop"]'):
+        for phone_key in ("phone", "contact:phone"):
+            parts.append(
+                'nwr["name"][!"website"][!"contact:website"]["%s"]%s(%s);'
+                % (phone_key, selector, box)
+            )
+    return "[out:json][timeout:60];(%s);out center %d;" % ("".join(parts), OSM_MAX_RESULTS)
+
+
+def overpass_get(query):
+    """Спрашивает Overpass, при неудаче пробует запасной инстанс."""
+    for endpoint in OSM_ENDPOINTS:
+        try:
+            r = requests.post(endpoint, data={"data": query},
+                              headers={"User-Agent": USER_AGENT}, timeout=75)
+            if r.status_code >= 400:
+                print("[osm] %s -> HTTP %s" % (endpoint, r.status_code))
+                continue
+            return r.json()
+        except Exception as e:
+            print("[osm] %s -> ошибка (%s): %s" % (endpoint, type(e).__name__, e))
+    return None
+
+
+def check_osm_no_website(seen):
+    if not OSM_ENABLED:
+        return
+
+    city = pick_osm_city()
+    if city is None:
+        return
+
+    data = overpass_get(build_osm_query(city["bbox"]))
+    if data is None:
+        print("[osm] ни один инстанс Overpass не ответил - пропускаю")
+        return
+
+    elements = data.get("elements", [])
+    print("[osm] %s: заведений без сайта найдено %d" % (city["name"], len(elements)))
+
+    source = ("Maps — business without a website" if city["lang"] == "en"
+              else "Карты — бизнес без сайта")
+
+    for element in elements:
+        tags = element.get("tags") or {}
+        name = (tags.get("name") or "").strip()
+        phone = (tags.get("phone") or tags.get("contact:phone") or "").strip()
+        if not name or not phone:
+            continue
+
+        uid = "osm:%s/%s" % (element.get("type"), element.get("id"))
+        if uid in seen:
+            continue
+        seen.add(uid)
+
+        category = tags.get("amenity") or tags.get("shop") or ""
+        street = " ".join(filter(None, [tags.get("addr:street"),
+                                        tags.get("addr:housenumber")])).strip()
+
+        details = ["📞 " + phone]
+        if street:
+            details.append("📍 " + street)
+        if category:
+            details.append("🏷 " + category)
+
+        link = "https://www.openstreetmap.org/%s/%s" % (element.get("type"),
+                                                        element.get("id"))
+        notify(source, "%s — %s" % (name, city["name"]), "", link,
+               details="\n".join(details))
+
+
 # ---------------------- ОДИН ЗАПУСК ----------------------
 
 def main():
@@ -1754,8 +1929,9 @@ def main():
         return
 
     for check_fn in (check_kwork_mail, check_flru, check_hn_freelance,
-                      check_wwr, check_remoteok, check_hh_crowd, check_weblancer,
-                      check_hh_broad, check_hh_project, check_superjob,
+                      check_wwr, check_remoteok, check_osm_no_website,
+                      check_hh_crowd, check_weblancer, check_hh_broad,
+                      check_hh_project, check_superjob,
                       check_telegram_channels):
         print(f"-> {check_fn.__name__}")
         try:
