@@ -62,4 +62,13 @@ jobs:
           git config user.email "actions@users.noreply.github.com"
           git add seen_leads.json
           git diff --staged --quiet || git commit -m "chore: update seen leads"
+          # Пока прогон шёл, main мог уехать вперёд: cron-job.org и запасной
+          # schedule иногда стартуют почти одновременно, и тогда обычный push
+          # отлетал с ошибкой, а прогон падал целиком (и накопленное
+          # просмотренное терялось). Подтягиваем чужие коммиты и пробуем ещё.
+          for attempt in 1 2 3; do
+            git push && exit 0
+            echo "push не прошёл (попытка $attempt), подтягиваю main"
+            git pull --rebase --autostash origin main || exit 1
+          done
           git push
