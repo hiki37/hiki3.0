@@ -195,7 +195,18 @@ DRAFT_TEMPLATES = (
         "ask": "Какой у вас сервер и есть ли к нему доступ по SSH?",
     },
     {
-        "keys": ("wordpress", "вордпресс", "tilda", "тильда", "лендинг", "верстк",
+        # Ставим ВЫШЕ общего "сайта": лендинг и MVP под ключ - отдельный
+        # разговор, там ценно не "поправлю вёрстку", а "заберу задачу целиком,
+        # вместе с хостингом и доменом".
+        "keys": ("лендинг", "одностраничн", "mvp", "под ключ", "визитк",
+                 "с нуля", "мини-апп", "миниапп", "мини апп"),
+        "what": "Сделаю под ключ: страницу, подключение хостинга и домена - "
+                "чтобы вы получили работающий адрес, а не папку с файлами.",
+        "ask": "Есть ли уже текст и картинки, или собирать вместе с вами - и "
+               "куплен ли домен?",
+    },
+    {
+        "keys": ("wordpress", "вордпресс", "tilda", "тильда", "верстк",
                  "вёрстк", "сайт", "одностраничн", "интернет-магазин"),
         "what": "Возьмусь за правки по сайту: сделаю аккуратно, не ломая то, что "
                 "уже работает, и покажу результат на копии перед публикацией.",
@@ -272,7 +283,16 @@ DRAFT_TEMPLATES_EN = (
         "ask": "What are you running on right now, and do I get SSH access?",
     },
     {
-        "keys": ("website", "landing", "wordpress", "webflow", "shopify",
+        "keys": ("landing page", "mvp", "prototype", "from scratch",
+                 "new site", "one-pager", "micro app", "mini app"),
+        "what": "I can take this end to end - the build plus hosting and the "
+                "domain wired up, so you end up with a working URL rather than "
+                "a folder of files.",
+        "ask": "Do you already have the copy and images, or is that part of the "
+               "job - and is the domain bought?",
+    },
+    {
+        "keys": ("website", "wordpress", "webflow", "shopify",
                  "frontend", "front-end", "ui"),
         "what": "I can take this on and work against a staging copy, so nothing "
                 "breaks on the live site while I do.",
@@ -647,12 +667,48 @@ MAX_NOTIFICATIONS_PER_SOURCE = 5
 _notify_state = {"sent": 0, "skipped": 0, "by_source": {}}
 
 
+# Заказчики на Hacker News и в Telegram-каналах почти всегда оставляют способ
+# связи прямо в тексте: почту или @ник. Вытаскиваем его наверх сообщения -
+# иначе связь приходится выковыривать из простыни текста руками, а на
+# американском рынке именно почта и есть канал: там пишешь напрямую, а не
+# жмёшь "откликнуться" на бирже.
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}")
+_TG_HANDLE_RE = re.compile(r"(?<![A-Za-z0-9_@/])@([A-Za-z][A-Za-z0-9_]{4,31})")
+
+# Почты самих площадок - не контакты заказчика.
+_CONTACT_IGNORE = ("kwork.ru", "fl.ru", "free-lance.ru", "noreply", "no-reply",
+                   "example.com", "sentry.io", "github.com")
+
+
+def extract_contacts(text):
+    """Ищет в тексте лида почту и телеграм-ник заказчика."""
+    if not text:
+        return ""
+    found = []
+    for email_match in _EMAIL_RE.findall(text):
+        low = email_match.lower()
+        if any(bad in low for bad in _CONTACT_IGNORE):
+            continue
+        if email_match not in found:
+            found.append(email_match)
+    for handle in _TG_HANDLE_RE.findall(text):
+        tag = "@" + handle
+        if tag not in found:
+            found.append(tag)
+    return ", ".join(found[:3])
+
+
 def notify(source, title, description, link, details=None):
     """details - уже собранный текст уведомления. Если он задан, description
     не используется: источник сам решил, что и как показывать (у Kwork,
     например, это цена + рубрика + покупатель отдельными строками)."""
     body = details if details is not None else (description or "")[:300]
     msg = f"🆕 {source}\n\n{title}"
+
+    contacts = extract_contacts("%s %s" % (title or "", body or ""))
+    if contacts:
+        msg += f"\n\n📬 Контакт: {contacts}"
+
     if body:
         msg += f"\n\n{body}"
     if link:

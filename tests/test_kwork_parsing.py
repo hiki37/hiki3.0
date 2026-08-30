@@ -322,6 +322,41 @@ lm.hn_algolia_get = lambda path, params: {"hits": [
 thread_id, _ = lm.find_hn_freelance_thread()
 check(thread_id is None, "тред 'Who wants to be hired' не принят за нужный")
 
+print("\n21. Контакт заказчика вытаскивается наверх сообщения")
+hn_text = ("SEEKING FREELANCER | Remote | We need a Python scraper. "
+           "Email me at sarah@acmelabs.io or ping @acmesarah on telegram")
+check(lm.extract_contacts(hn_text) == "sarah@acmelabs.io, @acmesarah",
+      "почта и ник найдены (получено %r)" % lm.extract_contacts(hn_text))
+check(lm.extract_contacts("no contacts here at all") == "", "пустой текст - пусто")
+check(lm.extract_contacts("write to info@kwork.ru") == "",
+      "почта самой площадки за контакт заказчика не принимается")
+
+sent[:] = []
+lm.build_draft = lambda *a, **k: None
+lm.notify("Hacker News — Seeking freelancer", "SEEKING FREELANCER | Python scraper",
+          "", "https://news.ycombinator.com/item?id=1", details=hn_text)
+check(sent and "📬 Контакт: sarah@acmelabs.io" in sent[0], "контакт попал в сообщение")
+if sent:
+    print("  --- как это придёт ---")
+    for line in sent[0].splitlines()[:6]:
+        print("  | " + line)
+lm.build_draft = real_build_draft
+
+print("\n22. Шаблон под MVP/лендинг под ключ (то, что добавил о себе)")
+ru = lm.build_draft("Kwork", "Нужен лендинг с нуля", "", "")
+check("хостинг" in ru.lower() and "домен" in ru.lower(),
+      "русский черновик обещает хостинг и домен")
+check(ru.rstrip().endswith("?"), "вопрос на месте")
+print("  | " + ru)
+
+en = lm.build_draft("Hacker News — Seeking freelancer", "Need a landing page for our MVP", "", "")
+check("hosting" in en.lower() and "domain" in en.lower(),
+      "английский черновик обещает хостинг и домен")
+check(en.startswith("Hi!"), "по-английски")
+print("  | " + en)
+
+check("вордпресс" not in ru.lower(), "общий шаблон про сайты не перебил специальный")
+
 print("\n" + "=" * 60)
 if failures:
     print("ПРОВАЛЕНО проверок: %d" % len(failures))
