@@ -217,6 +217,44 @@ draft = lm.build_draft("Kwork", "Нужен простой тг-бот для о
 check(draft and "бот" in draft.lower(), "откат на бесплатный шаблон сработал")
 lm.ANTHROPIC_API_KEY = ""
 
+print("\n15. Англоязычные источники: свой фильтр и свой черновик")
+check(lm.is_english_source("Hacker News — Seeking freelancer"), "HN опознан как англоязычный")
+check(lm.is_english_source("RemoteOK"), "RemoteOK опознан")
+check(not lm.is_english_source("Kwork"), "Kwork - не англоязычный")
+
+# русский список на английском тексте почти не срабатывает - ради этого и заведён KEYWORDS_EN
+us_task = "SEEKING FREELANCER | Remote | We need a Python scraper to pull product data"
+check(lm.matches_keywords(us_task, lm.KEYWORDS_EN), "английский фильтр ловит задачу")
+
+draft = lm.build_draft("Hacker News — Seeking freelancer", us_task, "", "")
+print("  --- черновик для американского заказчика ---")
+for line in draft.split(". "):
+    print("  | " + line.strip() + ("" if line.strip().endswith("?") else "."))
+check(draft.startswith("Hi!"), "черновик по-английски")
+check("scraper" in draft.lower(), "тип задачи опознан (scraper)")
+check(draft.rstrip().endswith("?"), "вопрос в конце")
+check("Здравствуйте" not in draft, "русского текста в англоязычном черновике нет")
+
+check(lm.build_draft("Kwork", "Нужен парсер сайта", "", "").startswith("Здравствуйте"),
+      "русский источник по-прежнему получает русский черновик")
+
+print("\n16. HN: берём только тех, кто ИЩЕТ исполнителя")
+hits = [
+    {"objectID": "1", "author": "acme",
+     "comment_text": "SEEKING FREELANCER<p>Remote | We need a Python scraper. Email me at a@b.co"},
+    {"objectID": "2", "author": "dev42",
+     "comment_text": "SEEKING WORK<p>Python developer, 10 years, available for contract"},
+]
+sent[:] = []
+lm.hn_algolia_get = lambda path, params: (
+    {"hits": [{"objectID": "999", "title": "Ask HN: Freelancer? Seeking freelancer? (August 2026)",
+               "created_at_i": 1}]} if path == "/search" else {"hits": hits})
+lm.check_hn_freelance(set())
+check(len(sent) == 1, "отправлен только заказчик, не соискатель (получено %d)" % len(sent))
+if sent:
+    check("news.ycombinator.com/item?id=1" in sent[0], "ссылка на комментарий заказчика")
+    check("acme" in sent[0], "автор указан")
+
 print("\n" + "=" * 60)
 if failures:
     print("ПРОВАЛЕНО проверок: %d" % len(failures))

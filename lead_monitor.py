@@ -124,7 +124,7 @@ DRAFT_MODEL = "claude-opus-5"
 # Для каких источников готовить черновик (совпадение по подстроке в названии).
 # FL.ru намеренно не включён: там отклик платный, и жечь деньги на заготовку
 # к заказу, на который ты всё равно не ответишь, смысла нет.
-DRAFT_SOURCES = ("Kwork", "Telegram")
+DRAFT_SOURCES = ("Kwork", "Telegram", "Hacker News", "WeWorkRemotely", "RemoteOK")
 
 # Потолок только для платного движка "ai" - шаблоны бесплатны и не считаются.
 DRAFT_MAX_PER_RUN = 5
@@ -221,6 +221,71 @@ DRAFT_FALLBACK = {
     "ask": "Чтобы не гадать по срокам и цене, опишите чуть подробнее, что должно "
            "получиться на выходе?",
 }
+
+# Англоязычные заготовки - для источников из ENGLISH_SOURCES. Тон другой,
+# чем в русских: американский заказчик ждёт короткое письмо по делу, без
+# извинений и без "готов приступить немедленно".
+DRAFT_TEMPLATES_EN = (
+    {
+        "keys": ("telegram", "discord", "chatbot", "chat bot", "slack bot"),
+        "what": "I can build this bot in Python - the flow, the data storage, "
+                "and a simple way for you to read the results.",
+        "ask": "What should it do first, and where would you like the data to "
+               "land - a spreadsheet, a database, or a channel?",
+    },
+    {
+        "keys": ("scrap", "crawl", "parser", "parse", "data extraction", "dataset"),
+        "what": "I can write the scraper in Python and hand you the data as "
+                "CSV, Excel or straight into a database, re-runnable on a schedule.",
+        "ask": "Could you send one example URL and the fields you need from the "
+               "page?",
+    },
+    {
+        "keys": ("automat", "script", "spreadsheet", "google sheets", "excel",
+                 "zapier", "make.com", "workflow", "manual process"),
+        "what": "I can automate this end to end: your input goes in, the finished "
+                "output comes out, and the settings live in a config file you can "
+                "edit without me.",
+        "ask": "Which step eats the most time right now, and what should the final "
+               "output look like?",
+    },
+    {
+        "keys": ("integrat", "api", "webhook", "crm", "sync", "connect"),
+        "what": "I can build the integration with proper logging and error "
+                "handling, so it doesn't fail silently at 3am.",
+        "ask": "Which two systems need to talk to each other, and do you already "
+               "have API access to both?",
+    },
+    {
+        "keys": ("ai", "llm", "gpt", "openai", "anthropic", "claude", "rag",
+                 "embedding", "prompt"),
+        "what": "I can build this on top of an existing model API - the prompting, "
+                "the output handling, and an interface you actually want to use.",
+        "ask": "What goes in and what should come out? Send me two real examples "
+               "and I'll show you the result on those.",
+    },
+    {
+        "keys": ("server", "docker", "deploy", "devops", "aws", "vps", "hosting",
+                 "ci/cd"),
+        "what": "I can set this up on your infrastructure and leave you a short "
+                "runbook so you can restart it yourself.",
+        "ask": "What are you running on right now, and do I get SSH access?",
+    },
+    {
+        "keys": ("website", "landing", "wordpress", "webflow", "shopify",
+                 "frontend", "front-end", "ui"),
+        "what": "I can take this on and work against a staging copy, so nothing "
+                "breaks on the live site while I do.",
+        "ask": "Could you send the URL and the list of changes you have in mind?",
+    },
+)
+
+DRAFT_FALLBACK_EN = {
+    "what": "This looks like a good fit for what I do - happy to take it on.",
+    "ask": "Rather than guess at scope: what does 'done' look like for you?",
+}
+
+DRAFT_PROOF_EN = ("I'll show you it working before you pay anything.")
 
 # Отдельный случай: покупатель написал лично. Это не отклик на заказ, а ответ
 # человеку, который уже ждёт, - и тон тут совсем другой.
@@ -347,11 +412,38 @@ def strip_html(text, keep_newlines=False):
     return text.strip()
 
 
-def matches_keywords(text):
-    if not KEYWORDS:
+# Англоязычные источники фильтруются своим списком: русский список на них
+# почти не срабатывает (там нет ни "бот", ни "разработ"), а общий список из
+# двух языков сделал бы русские источники шумнее.
+KEYWORDS_EN = [
+    "python", "javascript", "typescript", "node", "react", "vue", "next.js",
+    "frontend", "backend", "full stack", "fullstack", "web developer",
+    "telegram bot", "discord bot", "chatbot", "bot ",
+    "scraper", "scraping", "crawler", "parser", "data extraction",
+    "automation", "automate", "script", "spreadsheet", "google sheets",
+    "integration", "api", "webhook", "crm", "zapier", "make.com",
+    "ai ", "llm", "gpt", "openai", "anthropic", "claude", "rag", "embedding",
+    "prompt engineer", "machine learning",
+    "landing page", "website", "webflow", "wordpress", "shopify",
+    "django", "flask", "fastapi", "postgres", "sql",
+    "docker", "devops", "aws", "deploy", "server setup",
+    "mvp", "prototype", "freelance", "contract", "part-time", "hourly",
+]
+
+# Источники, где всё по-английски: и фильтр, и черновик отклика.
+ENGLISH_SOURCES = ("Hacker News", "WeWorkRemotely", "RemoteOK")
+
+
+def is_english_source(source):
+    return any(s.lower() in (source or "").lower() for s in ENGLISH_SOURCES)
+
+
+def matches_keywords(text, keywords=None):
+    words = KEYWORDS if keywords is None else keywords
+    if not words:
         return True
     low = text.lower()
-    return any(kw.lower() in low for kw in KEYWORDS)
+    return any(kw.lower() in low for kw in words)
 
 
 def send_telegram(text):
@@ -418,14 +510,14 @@ def wants_draft(source):
     return any(s.lower() in (source or "").lower() for s in DRAFT_SOURCES)
 
 
-def pick_template(text):
-    """Определяет тип задачи по тексту. Возвращает шаблон из DRAFT_TEMPLATES
-    или DRAFT_FALLBACK, если тип не опознан."""
+def pick_template(text, templates=None, fallback=None):
+    """Определяет тип задачи по тексту. Возвращает подходящий шаблон или
+    fallback, если тип не опознан."""
     low = (text or "").lower()
-    for template in DRAFT_TEMPLATES:
+    for template in (templates if templates is not None else DRAFT_TEMPLATES):
         if any(key in low for key in template["keys"]):
             return template
-    return DRAFT_FALLBACK
+    return fallback if fallback is not None else DRAFT_FALLBACK
 
 
 def template_draft(source, title, details):
@@ -440,7 +532,13 @@ def template_draft(source, title, details):
     if is_direct_source(source):
         return DRAFT_DIRECT_REPLY
 
-    template = pick_template("%s %s" % (title or "", details or ""))
+    text = "%s %s" % (title or "", details or "")
+
+    if is_english_source(source):
+        template = pick_template(text, DRAFT_TEMPLATES_EN, DRAFT_FALLBACK_EN)
+        return " ".join(["Hi!", template["what"], DRAFT_PROOF_EN, template["ask"]])
+
+    template = pick_template(text)
     return " ".join([
         "Здравствуйте!",
         template["what"],
@@ -1282,6 +1380,199 @@ def check_hh_project(seen):
                    details="\n".join(details))
 
 
+# ---------------------- ИСТОЧНИК 8: HACKER NEWS (США) ----------------------
+#
+# Раз в месяц на Hacker News выходит тред "Ask HN: Freelancer? Seeking
+# freelancer?". Комментарии, начинающиеся с SEEKING FREELANCER, - это
+# заказчики, которые ищут исполнителя: почти всегда США или Западная Европа,
+# с бюджетами в долларах и почтой для связи прямо в тексте. Для выхода на
+# американский рынок это самый прямой бесплатный канал: не биржа с
+# комиссией и коннектами, а живой заказчик, которому пишешь на почту.
+#
+# Данные берём через публичный API поиска Algolia - без токена и регистрации.
+
+HN_ENABLED = True
+HN_ALGOLIA = "https://hn.algolia.com/api/v1"
+HN_THREAD_QUERY = "Freelancer? Seeking freelancer?"
+HN_MAX_COMMENTS = 100
+
+
+def hn_algolia_get(path, params):
+    try:
+        r = requests.get(HN_ALGOLIA + path, params=params,
+                         headers={"User-Agent": USER_AGENT}, timeout=20)
+        if r.status_code >= 400:
+            print("[hn] HTTP %s: %s" % (r.status_code, r.text[:200]))
+            return None
+        return r.json()
+    except Exception as e:
+        print("[hn] ошибка запроса (%s): %s" % (type(e).__name__, e))
+        return None
+
+
+def find_hn_freelance_thread():
+    """Находит самый свежий месячный тред 'Freelancer? Seeking freelancer?'."""
+    data = hn_algolia_get("/search", {
+        "tags": "story", "query": HN_THREAD_QUERY, "hitsPerPage": 10,
+    })
+    if not data:
+        return None, None
+    best = None
+    for hit in data.get("hits", []):
+        title = (hit.get("title") or "").lower()
+        # именно тред про поиск фрилансера, а не "Who wants to be hired"
+        if "seeking freelancer" not in title:
+            continue
+        if best is None or (hit.get("created_at_i") or 0) > (best.get("created_at_i") or 0):
+            best = hit
+    if best is None:
+        print("[hn] тред 'Seeking freelancer' не найден")
+        return None, None
+    return best.get("objectID"), best.get("title")
+
+
+def check_hn_freelance(seen):
+    if not HN_ENABLED:
+        return
+
+    thread_id, thread_title = find_hn_freelance_thread()
+    if not thread_id:
+        return
+
+    data = hn_algolia_get("/search_by_date", {
+        "tags": "comment,story_%s" % thread_id, "hitsPerPage": HN_MAX_COMMENTS,
+    })
+    if not data:
+        return
+
+    hits = data.get("hits", [])
+    print("[hn] тред: %s (комментариев получено: %d)" % (thread_title, len(hits)))
+
+    for hit in hits:
+        comment_id = hit.get("objectID")
+        if not comment_id:
+            continue
+        uid = "hn:" + str(comment_id)
+        if uid in seen:
+            continue
+        seen.add(uid)
+
+        text = strip_html(hit.get("comment_text") or "", keep_newlines=True)
+        if not text:
+            continue
+
+        # Нас интересуют только те, кто ИЩЕТ исполнителя. Заголовок стоит в
+        # начале комментария, поэтому проверяем именно начало: иначе поймаем
+        # исполнителей, упомянувших "seeking freelancer" в тексте о себе.
+        head = text[:120].lower().replace("-", " ")
+        if "seeking freelancer" not in head:
+            continue
+
+        title = " ".join(text.split("\n")[0].split()[:14])
+        link = "https://news.ycombinator.com/item?id=%s" % comment_id
+        author = hit.get("author") or ""
+
+        if matches_keywords(text, KEYWORDS_EN):
+            details = text[:600]
+            if author:
+                details = "author: " + author + "\n" + details
+            notify("Hacker News — Seeking freelancer", title, "", link,
+                   details=details)
+
+
+# ---------------------- ИСТОЧНИК 9: WE WORK REMOTELY (США) ----------------------
+#
+# Крупная англоязычная доска удалённой работы с открытыми RSS-лентами по
+# категориям. Ни ключа, ни регистрации. Здесь больше найма в штат, чем
+# разовых заказов, но контрактные и part-time позиции попадаются регулярно.
+
+WWR_ENABLED = True
+WWR_RSS_URLS = [
+    "https://weworkremotely.com/categories/remote-programming-jobs.rss",
+    "https://weworkremotely.com/categories/remote-back-end-programming-jobs.rss",
+]
+
+
+def check_wwr(seen):
+    if not WWR_ENABLED:
+        return
+    for url in WWR_RSS_URLS:
+        try:
+            feed = fetch_feed(url)
+        except Exception as e:
+            print("[wwr] ошибка загрузки ленты (%s) (%s): %s"
+                  % (url, type(e).__name__, e))
+            continue
+
+        if not feed.entries:
+            print("[wwr] лента пуста: %s" % url)
+            continue
+
+        for entry in feed.entries:
+            uid = "wwr:" + (entry.get("id") or entry.get("link", ""))
+            if uid == "wwr:" or uid in seen:
+                continue
+            seen.add(uid)
+
+            title = strip_html(entry.get("title", ""))
+            description = strip_html(entry.get("summary", ""))
+            link = entry.get("link", "")
+
+            if matches_keywords(title + " " + description, KEYWORDS_EN):
+                notify("WeWorkRemotely", title, "", link, details=description[:400])
+
+
+# ---------------------- ИСТОЧНИК 10: REMOTEOK (США) ----------------------
+#
+# Открытый JSON без ключа. Первый элемент ответа - юридическая заметка, а не
+# вакансия, её пропускаем. Просит внятный User-Agent.
+
+REMOTEOK_ENABLED = True
+REMOTEOK_URL = "https://remoteok.com/api"
+
+
+def check_remoteok(seen):
+    if not REMOTEOK_ENABLED:
+        return
+    try:
+        r = requests.get(REMOTEOK_URL, headers={"User-Agent": USER_AGENT}, timeout=20)
+        if r.status_code >= 400:
+            print("[remoteok] HTTP %s: %s" % (r.status_code, r.text[:200]))
+            return
+        data = r.json()
+    except Exception as e:
+        print("[remoteok] ошибка запроса (%s): %s" % (type(e).__name__, e))
+        return
+
+    if not isinstance(data, list):
+        print("[remoteok] неожиданный формат ответа - пропускаю")
+        return
+
+    for item in data:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue    # первая запись - дисклеймер, а не вакансия
+        uid = "remoteok:" + str(item["id"])
+        if uid in seen:
+            continue
+        seen.add(uid)
+
+        title = item.get("position") or item.get("title") or "Без названия"
+        company = item.get("company") or ""
+        description = strip_html(item.get("description") or "")
+        link = item.get("url") or ""
+        tags = " ".join(item.get("tags") or [])
+
+        if matches_keywords(" ".join([title, tags, description]), KEYWORDS_EN):
+            details = []
+            if company:
+                details.append("company: " + company)
+            if tags:
+                details.append("tags: " + tags)
+            if description:
+                details.append(description[:300])
+            notify("RemoteOK", title, "", link, details="\n".join(details))
+
+
 # ---------------------- ОДИН ЗАПУСК ----------------------
 
 def main():
@@ -1356,7 +1647,8 @@ def main():
         print("Проиндексировано. Дальше - только новое: заказы, письма Kwork, вакансии hh.ru.")
         return
 
-    for check_fn in (check_kwork_mail, check_flru, check_hh_crowd, check_weblancer,
+    for check_fn in (check_kwork_mail, check_flru, check_hn_freelance,
+                      check_wwr, check_remoteok, check_hh_crowd, check_weblancer,
                       check_hh_broad, check_hh_project, check_superjob,
                       check_telegram_channels):
         print(f"-> {check_fn.__name__}")
