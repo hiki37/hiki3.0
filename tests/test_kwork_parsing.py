@@ -18,6 +18,7 @@ import lead_monitor as lm
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sent = []
+real_send_telegram = lm.send_telegram   # настоящая функция, для теста обрезки
 lm.send_telegram = lambda text: sent.append(text)
 
 failures = []
@@ -133,6 +134,42 @@ if len(posts) == 2:
     check("\n" in posts[0]["text"], "переносы строк в посте сохранены")
     check(lm.matches_keywords(posts[0]["text"]), "пост про бота проходит фильтр")
     check(not lm.matches_keywords(posts[1]["text"]), "пост про гараж отсеивается")
+
+print("\n8. Черновики откликов: только для нужных источников")
+check(lm.wants_draft("Kwork"), "Kwork - черновик нужен")
+check(lm.wants_draft("Kwork — ЛИЧНОЕ ⚡"), "личка Kwork - черновик нужен")
+check(lm.wants_draft("Telegram: frilanser_vacansii"), "Telegram - черновик нужен")
+check(not lm.wants_draft("FL.ru"), "FL.ru - черновика НЕТ (там отклик платный)")
+check(not lm.wants_draft("SuperJob"), "SuperJob - черновика нет")
+
+print("\n9. Черновик попадает в сообщение")
+lm.generate_draft = lambda source, title, details, link: "Готов сделать бота. Когда нужен результат?"
+sent[:] = []
+lm.notify("Kwork", "Нужен простой тг-бот для отзывов", "", "https://kwork.ru/new_offer?project=1", details="💰 2 000 Р")
+check(len(sent) == 1, "уведомление отправлено")
+if sent:
+    print("  --- как это придёт в Telegram ---")
+    for line in sent[0].splitlines():
+        print("  | " + line)
+    check("ЧЕРНОВИК ОТКЛИКА" in sent[0], "черновик приложен")
+    check("Готов сделать бота" in sent[0], "текст черновика на месте")
+
+sent[:] = []
+lm.notify("FL.ru", "Небольшой модуль", "", "https://www.fl.ru/projects/1/", details="💰 15 000 ₽")
+check(sent and "ЧЕРНОВИК" not in sent[0], "к заказу с FL.ru черновик не прикладывается")
+
+print("\n10. Длинное сообщение обрезается, а не теряется")
+captured = []
+class FakeResponse:
+    status_code = 200
+    def raise_for_status(self): pass
+lm.requests.post = lambda url, data=None, timeout=None: (captured.append(data["text"]), FakeResponse())[1]
+lm.time.sleep = lambda s: None
+real_send_telegram("я" * 9000)
+check(len(captured) == 1 and len(captured[0]) <= 4100,
+      "сообщение обрезано до предела Telegram (получено %d символов)"
+      % (len(captured[0]) if captured else -1))
+check(captured and captured[0].endswith("[...обрезано]"), "обрезка помечена в тексте")
 
 print("\n" + "=" * 60)
 if failures:
