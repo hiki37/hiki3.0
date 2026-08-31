@@ -820,6 +820,110 @@ if queued:
           "ответ подклеится к переписке, а не придёт отдельным письмом")
     check(queued[0]["subject"] == "Re: Про сайт для кофейни", "тема - ответная")
 
+print("\n40. Почта проверяется ДО того, как лид уйдёт в бота")
+lm._contact_cache.clear()
+lm.domain_has_mx = lambda domain: True
+lm.domain_has_website = lambda domain: False
+check(not lm.contact_email_ok("rkk@")[0], "битый синтаксис отсеян")
+check(not lm.contact_email_ok("noreply@chef-lunch.ru")[0], "служебный адрес отсеян")
+check(lm.contact_email_ok("rkk@chef-lunch.ru")[0], "живой адрес проходит")
+
+lm._contact_cache.clear()
+lm.domain_has_mx = lambda domain: False
+ok, why = lm.contact_email_ok("info@mertvyi-domen.ru", set())
+check(not ok and "сервер" in why, "домен без MX отсеян (%s)" % why)
+
+lm._contact_cache.clear()
+lm.domain_has_mx = lambda domain: True
+lm.domain_has_website = lambda domain: True
+seen_sites = set()
+ok, why = lm.contact_email_ok("info@u-nih-est-sait.ru", seen_sites)
+check(not ok and "сайт" in why, "компания с живым сайтом отсеяна (%s)" % why)
+check("has-site:u-nih-est-sait.ru" in seen_sites, "домен запомнен - второй раз не проверяем")
+
+lm._contact_cache.clear()
+site_checks = []
+lm.domain_has_website = lambda domain: site_checks.append(domain) or True
+check(lm.contact_email_ok("73297819@mail.ru", set())[0], "ящик на mail.ru проходит")
+check(not site_checks, "сайт mail.ru не проверяем - это не сайт компании")
+
+lm._contact_cache.clear()
+lm.domain_has_website = lambda domain: False
+dead = {"dead-mail:rkk@chef-lunch.ru"}
+check(not lm.contact_email_ok("rkk@chef-lunch.ru", dead)[0],
+      "адрес, с которого пришла отбивка, больше не предлагается")
+check(lm.contact_email_ok("RKK@CHEF-LUNCH.RU", dead)[0] is False, "регистр не обходит запрет")
+
+print("\n41. Отбивка о недоставке разбирается сама")
+lm.IMAP_USER = "me@example.com"
+check(lm.looks_like_bounce("Mail Delivery Subsystem <mailer-daemon@googlemail.com>",
+                           "Сайт для Chef Lunch - Адрес не найден"),
+      "настоящая отбивка опознана")
+check(lm.looks_like_bounce("noreply@yandex.ru", "Undelivered Mail Returned to Sender"),
+      "англоязычная отбивка тоже")
+check(not lm.looks_like_bounce("sarah@acmelabs.io", "Re: your offer"),
+      "обычное письмо клиента отбивкой не считается")
+bounce_body = ("Адрес не найден. Сообщение не доставлено, так как адрес "
+               "rkk@chef-lunch.ru не найден или не принимает входящие письма. "
+               "Ответ удаленного сервера: 550 5.1.1. Исходное письмо от me@example.com")
+check(lm.bounced_address(bounce_body, "me@example.com") == "rkk@chef-lunch.ru",
+      "адрес, до которого не дошло, вытащен (получено %r)"
+      % lm.bounced_address(bounce_body, "me@example.com"))
+check(lm.bounced_address("ничего похожего", "me@example.com") == "",
+      "без адреса внутри - ничего не выдумываем")
+lm.IMAP_USER = ""
+
+print("\n42. Лид с мёртвой почтой не выкидывается, если есть телефон")
+lm._contact_cache.clear()
+lm._pending_state = {"offset": 0, "items": {}, "deferred": []}
+lm.domain_has_mx = lambda domain: False          # почта нерабочая
+lm.domain_has_website = lambda domain: False
+sent[:] = []
+reset_limits()
+lm.overpass_get = lambda query: {"elements": [
+    {"type": "node", "id": 611, "tags": {"name": "Чайхана", "amenity": "cafe",
+                                         "email": "info@mertvyi.ru",
+                                         "phone": "+7 495 111-22-33"}},
+    {"type": "node", "id": 612, "tags": {"name": "Только почта", "amenity": "cafe",
+                                         "email": "info@mertvyi2.ru"}},
+]}
+lm.pick_osm_city = lambda: {"name": "Москва", "lang": "ru", "cc": "7",
+                            "bbox": (55.55, 37.35, 55.92, 37.85)}
+seen_dead = set()
+lm.check_osm_no_website(seen_dead)
+lm.flush_notifications()
+check(len(sent) == 1, "ушёл только тот, до кого есть как достучаться (получено %d)"
+      % len(sent))
+if sent:
+    labels = [b["text"] for row in (sent[0][1] or {}).get("inline_keyboard", []) for b in row]
+    check("Чайхана" in sent[0][0], "это лид с рабочим телефоном")
+    check(not any("письмо" in x.lower() for x in labels),
+          "кнопки письма нет - адрес мёртвый (кнопки: %s)" % labels)
+    check(any("WhatsApp" in x for x in labels), "остался мессенджер")
+check("osm:node/612" in seen_dead, "лид совсем без связи закрыт, чтобы не всплывал")
+
+print("\n43. У компании уже есть сайт - лид не показываем вообще")
+lm._contact_cache.clear()
+lm.domain_has_mx = lambda domain: True
+lm.domain_has_website = lambda domain: True
+sent[:] = []
+reset_limits()
+lm.overpass_get = lambda query: {"elements": [
+    {"type": "node", "id": 613, "tags": {"name": "Chef Lunch", "amenity": "cafe",
+                                         "email": "rkk@chef-lunch.ru",
+                                         "phone": "+7 495 111-22-33"}},
+]}
+seen_site = set()
+lm.check_osm_no_website(seen_site)
+lm.flush_notifications()
+check(not sent, "в карты данные устарели: сайт есть - предлагать нечего")
+check("osm:node/613" in seen_site, "и второй раз он не всплывёт")
+
+print("\n44. Обрубок номера не превращается в кнопку")
+check(lm.osm_phone_digits("+7 495 999", "7") == "", "короткий номер отброшен")
+check(lm.osm_phone_digits("+7 495 111-22-33-44", "7") == "", "слишком длинный тоже")
+check(lm.osm_phone_digits("+7 495 111-22-33", "7") == "74951112233", "нормальный проходит")
+
 print("\n" + "=" * 60)
 if failures:
     print("ПРОВАЛЕНО проверок: %d" % len(failures))

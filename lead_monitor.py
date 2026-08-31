@@ -1772,6 +1772,28 @@ def check_personal_mail(seen):
             if uid in seen:
                 continue
 
+            # Отбивка о недоставке разбирается ДО фильтра роботов: формально
+            # это письмо от робота, но именно оно закрывает круг - адрес,
+            # который не существует, больше никогда не попадёт в бота.
+            if looks_like_bounce(sender, subject, raw_headers):
+                seen.add(uid)
+                status, body_data = conn.fetch(num, "(BODY.PEEK[])")
+                body = ""
+                if status == "OK" and body_data and body_data[0]:
+                    body = get_email_body(email.message_from_bytes(body_data[0][1]))
+                failed = bounced_address(
+                    "%s %s" % (subject, strip_html(body, keep_newlines=True)[:2000]),
+                    IMAP_USER)
+                if failed:
+                    seen.add("dead-mail:" + failed.lower())
+                    print("[mail] отбивка: %s помечен мёртвым" % failed)
+                    send_telegram(
+                        "↩️ Письмо не дошло: %s\n\nАдрес не существует или не "
+                        "принимает почту. Больше его не предложу." % failed)
+                else:
+                    print("[mail] отбивка без адреса внутри - пропускаю")
+                continue
+
             if looks_like_robot_mail(sender, raw_headers):
                 seen.add(uid)      # рассылку второй раз не разбираем
                 continue
@@ -2443,6 +2465,170 @@ def build_osm_query(bbox, contact_keys=OSM_CONTACT_KEYS):
     return "[out:json][timeout:60];(%s);out center %d;" % ("".join(parts), OSM_MAX_RESULTS)
 
 
+# ==================== ПРОВЕРКА КОНТАКТА ПЕРЕД ОТПРАВКОЙ ====================
+#
+# Повод: оффер ушёл на rkk@chef-lunch.ru и вернулся отбивкой "адрес не
+# найден". В OSM почту вписывают руками и годами не правят - часть адресов
+# давно мертва, часть ведёт на домен, который уже отдан под сайт.
+#
+# Что проверить МОЖНО и что нельзя, честно:
+#   - синтаксис и служебные адреса - да, бесплатно;
+#   - есть ли у домена почтовый сервер (MX) - да, обычный DNS-запрос. Это
+#     ловит мёртвые домены целиком;
+#   - есть ли у домена живой сайт - да, обычный HTTP-запрос. И это ловит не
+#     "мёртвый адрес", а кое-что важнее: если сайт есть, то весь наш повод
+#     ("заметил, что сайта у вас нет") - враньё, и лид надо выкинуть;
+#   - существует ли КОНКРЕТНЫЙ ящик на живом домене - НЕТ. Это делается
+#     только SMTP-запросом RCPT TO на 25-й порт, а GitHub Actions исходящий
+#     25-й порт закрывает наглухо. Ровно этот случай и был у chef-lunch.ru:
+#     домен живой, почтовый сервер живой, а ящика нет.
+# Поэтому последний рубеж - отбивка: она приходит в тот же ящик, бот её
+# читает, помечает адрес мёртвым и больше никогда его не предлагает.
+
+# На этих доменах ящик может быть любым, а сайт домена к делу не относится:
+# mail.ru - это не сайт кофейни.
+FREE_MAIL_DOMAINS = {
+    "mail.ru", "bk.ru", "inbox.ru", "list.ru", "internet.ru",
+    "yandex.ru", "ya.ru", "yandex.com", "narod.ru",
+    "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
+    "icloud.com", "me.com", "rambler.ru", "aol.com", "yahoo.com",
+    "proton.me", "protonmail.com", "gmx.de", "web.de", "t-online.de",
+}
+
+# Адреса, которые писать бессмысленно: их никто не читает.
+JUNK_MAIL_MARKERS = ("noreply", "no-reply", "no_reply", "donotreply",
+                     "example.", "@test.", "test@", "@localhost",
+                     "@example", "abuse@", "postmaster@", "mailer-daemon")
+
+_contact_cache = {}
+
+
+def mail_domain(addr):
+    return (addr or "").rsplit("@", 1)[-1].strip().lower().strip(".")
+
+
+def domain_has_mx(domain):
+    """Есть ли у домена почтовый сервер. None - проверить не удалось.
+
+    None и False - разные вещи: False значит "письму некуда идти", а None -
+    "у нас не получилось спросить", и терять из-за этого лид неправильно.
+    """
+    try:
+        import dns.resolver
+    except ImportError:
+        return None
+    try:
+        resolver = dns.resolver.Resolver()
+        resolver.lifetime = 6
+        resolver.timeout = 3
+        if resolver.resolve(domain, "MX"):
+            return True
+    except Exception as e:
+        name = type(e).__name__
+        # NXDOMAIN - домена нет вообще; NoAnswer - домен есть, MX нет.
+        # В обоих случаях письмо не дойдёт. Всё остальное (таймаут, сбой
+        # резолвера) - это наша проблема, а не проблема адреса.
+        if name in ("NXDOMAIN", "NoAnswer", "NoNameservers"):
+            # Почту принимает и домен без MX, если у него есть A-запись, -
+            # такой запасной путь описан в RFC, и в жизни он встречается.
+            if name == "NXDOMAIN":
+                return False
+            try:
+                return bool(resolver.resolve(domain, "A"))
+            except Exception:
+                return False
+        print("[check] MX %s -> не смог проверить (%s)" % (domain, name))
+        return None
+    return False
+
+
+def domain_has_website(domain):
+    """Отвечает ли домен живым сайтом. None - проверить не удалось."""
+    for url in ("https://%s" % domain, "http://%s" % domain):
+        try:
+            r = requests.get(url, timeout=8, allow_redirects=True,
+                             headers={"User-Agent": USER_AGENT})
+        except Exception:
+            continue
+        if r.status_code < 400 and len(r.content or b"") > 500:
+            return True
+    return False
+
+
+def contact_email_ok(addr, seen=None):
+    """(годится ли адрес, причина отказа). Причина - для лога, не для человека."""
+    addr = (addr or "").strip()
+    low = addr.lower()
+
+    if not addr or not _EMAIL_RE.fullmatch(addr):
+        return False, "не похоже на адрес"
+    if any(marker in low for marker in JUNK_MAIL_MARKERS):
+        return False, "служебный адрес"
+
+    domain = mail_domain(addr)
+    if seen is not None:
+        if ("dead-mail:" + low) in seen:
+            return False, "письмо на этот адрес уже отскакивало"
+        if ("dead-domain:" + domain) in seen:
+            return False, "домен уже признан мёртвым"
+        if ("has-site:" + domain) in seen:
+            return False, "у компании уже есть сайт"
+
+    if low in _contact_cache:
+        return _contact_cache[low]
+
+    result = (True, "")
+    if domain_has_mx(domain) is False:
+        if seen is not None:
+            seen.add("dead-domain:" + domain)
+        result = (False, "у домена нет почтового сервера")
+    elif domain not in FREE_MAIL_DOMAINS and domain_has_website(domain) is True:
+        # Самое неприятное из возможного: написать "у вас нет сайта" туда,
+        # где сайт есть. Значит, данные в картах просто устарели.
+        if seen is not None:
+            seen.add("has-site:" + domain)
+        result = (False, "у компании уже есть сайт (%s)" % domain)
+
+    _contact_cache[low] = result
+    return result
+
+
+# ==================== ОТБИВКИ: АДРЕС БОЛЬШЕ НЕ ПРЕДЛАГАТЬ ====================
+
+_BOUNCE_SENDERS = ("mailer-daemon", "postmaster", "mail-daemon",
+                   "mailerdaemon", "noreply-dmarc")
+_BOUNCE_SUBJECTS = ("undelivered mail", "returned to sender", "delivery status",
+                    "mail delivery failed", "delivery has failed",
+                    "адрес не найден", "address not found", "недоставлено",
+                    "не доставлено", "failure notice", "delivery incomplete")
+
+
+def looks_like_bounce(sender, subject, headers_text=""):
+    low_from = (sender or "").lower()
+    low_subj = (subject or "").lower()
+    low_head = (headers_text or "").lower()
+    return (any(m in low_from for m in _BOUNCE_SENDERS)
+            or any(m in low_subj for m in _BOUNCE_SUBJECTS)
+            or "report-type=delivery-status" in low_head)
+
+
+def bounced_address(text, own_address=""):
+    """Вытаскивает из отбивки адрес, до которого письмо не дошло."""
+    own = (own_address or "").lower()
+    for candidate in _EMAIL_RE.findall(text or ""):
+        low = candidate.lower()
+        if low == own or mail_domain(low) in ("", "localhost"):
+            continue
+        if any(marker in low for marker in JUNK_MAIL_MARKERS):
+            continue
+        return candidate
+    return ""
+
+
+# Сколько цифр в правильном номере вместе с кодом страны.
+PHONE_LENGTHS = {"7": (11,), "1": (11,), "44": (12, 13), "49": (11, 12, 13)}
+
+
 def osm_phone_digits(phone, cc):
     """Телефон из OSM -> цифры для ссылки wa.me.
 
@@ -2459,6 +2645,12 @@ def osm_phone_digits(phone, cc):
             digits = "7" + digits[1:]
         elif not digits.startswith(cc):
             digits = cc + digits.lstrip("0")
+    # Длина по стране: в картах попадаются обрубки ("+7 495 999") и
+    # внутренние добавочные. Ссылка на такой номер ведёт в никуда, и лучше
+    # показать лид без кнопки, чем с кнопкой в пустоту.
+    expected = PHONE_LENGTHS.get(cc)
+    if expected and len(digits) not in expected:
+        return ""
     return digits if 8 <= len(digits) <= 15 else ""
 
 
@@ -2536,6 +2728,23 @@ def check_osm_no_website(seen):
         mail = (tags.get("email") or tags.get("contact:email") or "").strip()
         mail = re.split(r"[;,\s]", mail)[0] if mail else ""
         if not name or not (phone or mail):
+            continue
+
+        # Проверяем ДО того, как лид попадёт в Telegram: отбивка "адрес не
+        # найден" стоит дороже пропущенного лида, а письмо в компанию,
+        # у которой сайт давно есть, - дороже вдвойне.
+        drop_lead = False
+        if mail:
+            ok, why = contact_email_ok(mail, seen)
+            if not ok:
+                print("[osm] %s: почта %s отсеяна - %s" % (name, mail, why))
+                if "сайт" in why:
+                    # Данные в картах устарели: сайт у них есть, повода
+                    # писать нет. Лид не показываем вообще.
+                    drop_lead = True
+                mail = ""
+        if drop_lead or not (mail or osm_phone_digits(phone, city.get("cc", "7"))):
+            seen.add("osm:%s/%s" % (element.get("type"), element.get("id")))
             continue
 
         uid = "osm:%s/%s" % (element.get("type"), element.get("id"))
