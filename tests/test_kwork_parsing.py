@@ -491,8 +491,9 @@ lm.flush_notifications()
 first_round = len(sent)
 check(first_round == lm.MAX_MAPS_PER_RUN,
       "за прогон ушло ровно %d (получено %d)" % (lm.MAX_MAPS_PER_RUN, first_round))
-check(len(seen_store) == first_round,
-      "в seen попали ТОЛЬКО отправленные: %d из 20" % len(seen_store))
+objects_seen = lambda: sum(1 for k in seen_store if k.startswith("osm:"))
+check(objects_seen() == first_round,
+      "в seen попали ТОЛЬКО отправленные: %d из 20" % objects_seen())
 
 # следующий круг по тому же городу - должны прийти СЛЕДУЮЩИЕ, а не те же
 reset_limits()
@@ -502,7 +503,7 @@ lm.flush_notifications()
 check(len(sent) == 20 - first_round, "на втором круге пришёл остаток (%d)" % len(sent))
 check(("Кафе %d" % first_round) in sent[0],
       "пришли следующие по списку, а не повтор (%s)" % sent[0].splitlines()[2])
-check(len(seen_store) == 20, "все 20 просмотрены за два круга")
+check(objects_seen() == 20, "все 20 просмотрены за два круга")
 
 print("\n28. У остальных источников потолок прежний")
 reset_limits()
@@ -673,6 +674,45 @@ if phone_only:
               "местный номер превращён в международный (%s)" % buttons[0]["url"][:45])
         check("%D0%A8%D0%B0%D0%B2%D0%B5%D1%80%D0%BC%D0%B0" in buttons[0]["url"],
               "название компании подставлено прямо в текст сообщения")
+
+print("\n35b. Одна и та же компания не получает два оффера")
+lm._pending_state = {"offset": 0, "items": {}, "deferred": []}
+sent[:] = []
+reset_limits()
+chain = {"elements": [
+    # сеть: три точки на карте, почта одна - письмо должно уйти ОДНО
+    {"type": "node", "id": 901, "tags": {"name": "Чио Чио", "shop": "hairdresser",
+                                         "email": "info@chio.ru"}},
+    {"type": "way", "id": 902, "tags": {"name": "Чио Чио", "shop": "hairdresser",
+                                        "email": "INFO@chio.ru"}},
+    {"type": "node", "id": 903, "tags": {"name": "Чио Чио на Ленина",
+                                         "shop": "hairdresser",
+                                         "contact:email": "info@chio.ru"}},
+    # и та же история с телефоном, записанным по-разному
+    {"type": "node", "id": 904, "tags": {"name": "Гермес", "amenity": "cafe",
+                                         "phone": "+7 383 111-22-33"}},
+    {"type": "node", "id": 905, "tags": {"name": "Гермес", "amenity": "cafe",
+                                         "phone": "8 (383) 111-22-33"}},
+]}
+lm.overpass_get = lambda query: chain
+lm.pick_osm_city = lambda: {"name": "Новосибирск", "lang": "ru", "cc": "7",
+                            "bbox": (54.95, 82.80, 55.13, 83.10)}
+seen_chain = set()
+lm.check_osm_no_website(seen_chain)
+lm.flush_notifications()
+check(len(sent) == 2, "два оффера на две компании, а не пять на пять точек (получено %d)"
+      % len(sent))
+check(sum(1 for m in sent if "Чио Чио" in m[0]) == 1, "сеть с одной почтой - одно письмо")
+check(sum(1 for m in sent if "Гермес" in m[0]) == 1, "один телефон - одно сообщение")
+check("osm-mail:info@chio.ru" in seen_chain and "osm-tel:73831112233" in seen_chain,
+      "контакт запомнен - дубль не всплывёт и на следующем круге")
+
+# следующий круг: объекты новые, но контакты те же - ничего не уходит
+sent[:] = []
+reset_limits()
+lm.check_osm_no_website(seen_chain)
+lm.flush_notifications()
+check(not sent, "на втором круге той же компании повторно не пишем")
 
 print("\n36. Номера телефонов из карт превращаются в ссылки")
 check(lm.osm_phone_digits("+7 (950) 002-05-99", "7") == "79500020599", "международный номер")

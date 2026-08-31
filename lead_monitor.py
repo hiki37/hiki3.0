@@ -892,6 +892,7 @@ def notify(source, title, description, link, details=None,
     send_body - текст письма, если он отличается от черновика в сообщении.
     buttons - готовые кнопки-ссылки (WhatsApp, Telegram) отдельным рядом.
     seen/seen_uid - пометить лид просмотренным ТОЛЬКО если он реально ушёл.
+    seen_uid может быть и списком: у карт это сам объект плюс его контакт.
 
     Само сообщение здесь не отправляется: оно встаёт в очередь прогона и
     уходит в flush_notifications() по убыванию приоритета.
@@ -982,7 +983,8 @@ def flush_notifications():
         _notify_state["sent"] += 1
         _notify_state["by_source"][source] = from_source + 1
         if item["seen"] is not None and item["uid"]:
-            item["seen"].add(item["uid"])
+            uids = ([item["uid"]] if isinstance(item["uid"], str) else item["uid"])
+            item["seen"].update(uids)
         print("[+] %s: %s" % (source, item["title"]))
 
 
@@ -2528,9 +2530,20 @@ def check_osm_no_website(seen):
             continue
 
         uid = "osm:%s/%s" % (element.get("type"), element.get("id"))
-        if uid in seen or uid in queued:
+
+        # Второй ключ - сам контакт. Сеть кофеен стоит в картах пятью
+        # объектами с одной и той же почтой (в боевом прогоне так пришли
+        # "Чио Чио", "Гермес" и "Zoloto studio"), а одно здание бывает
+        # записано и точкой, и контуром. По объекту это разные лиды, по
+        # человеку на том конце - один и тот же адрес, и второе письмо туда
+        # уже спам. Ключ ложится в seen вместе с объектом, поэтому дубль не
+        # всплывёт и на следующем круге.
+        contact_uid = ("osm-mail:" + mail.lower() if mail
+                       else "osm-tel:" + osm_phone_digits(phone, city.get("cc", "7")))
+        if uid in seen or contact_uid in seen or contact_uid in queued:
             continue
         queued.add(uid)
+        queued.add(contact_uid)
 
         category = tags.get("amenity") or tags.get("shop") or ""
         street = " ".join(filter(None, [tags.get("addr:street"),
@@ -2574,7 +2587,7 @@ def check_osm_no_website(seen):
                reply_to=mail or None,
                reply_subject=subject,
                buttons=buttons,
-               seen=seen, seen_uid=uid)
+               seen=seen, seen_uid=[uid, contact_uid])
 
 
 # ---------------------- ОДИН ЗАПУСК ----------------------
