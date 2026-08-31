@@ -25,6 +25,15 @@ sent = []
 real_send_telegram = lm.send_telegram   # настоящая функция, для теста обрезки
 real_build_draft = lm.build_draft
 real_overpass_get = lm.overpass_get   # до подмены в тестах про карты
+real_domain_has_mx = lm.domain_has_mx
+real_domain_has_website = lm.domain_has_website
+
+# Проверка контакта ходит в DNS и на сайт. В тестах этого быть не должно:
+# на машине без сети они бы проходили, а в CI с сетью - падали на реальном
+# ответе про реальный домен (ровно так и случилось). Блоки, которым нужна
+# другая проверка, подменяют эти функции сами.
+lm.domain_has_mx = lambda domain: True
+lm.domain_has_website = lambda domain: False
 lm.send_telegram = lambda text, reply_markup=None: sent.append(text)
 
 failures = []
