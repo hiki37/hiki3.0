@@ -50,7 +50,8 @@ import uuid
 from datetime import datetime, timedelta
 from email.header import decode_header
 from email.mime.text import MIMEText
-from email.utils import formataddr
+from email.utils import formataddr, parseaddr
+from urllib.parse import quote
 
 import feedparser
 import requests
@@ -130,7 +131,7 @@ DRAFT_MODEL = "claude-opus-5"
 # FL.ru намеренно не включён: там отклик платный, и жечь деньги на заготовку
 # к заказу, на который ты всё равно не ответишь, смысла нет.
 DRAFT_SOURCES = ("Kwork", "Telegram", "Hacker News", "WeWorkRemotely",
-                 "RemoteOK", "Карты", "Maps")
+                 "RemoteOK", "Карты", "Maps", "Личное письмо")
 
 # Потолок только для платного движка "ai" - шаблоны бесплатны и не считаются.
 DRAFT_MAX_PER_RUN = 5
@@ -318,23 +319,57 @@ DRAFT_PROOF_EN = ("I'll show you it working before you pay anything.")
 # обращение, и оно должно быть коротким, вежливым и с понятным поводом
 # ("увидел, что сайта нет"), иначе это обычный спам. Писать такое надо
 # ПОШТУЧНО - в мессенджер или звонком, а не рассылкой по списку.
+# {name} подставляется само - название заведения из карт. Обращение по
+# названию отличает письмо от рассылки сильнее любого другого приёма.
 DRAFT_OUTREACH_RU = (
-    "Здравствуйте! Нашёл вас в картах и заметил, что сайта у вас нет - только "
-    "телефон и адрес. Я делаю простые сайты-визитки под ключ: страница с "
-    "услугами и контактами, хостинг и домен подключаю сам, вам остаётся только "
-    "давать ссылку клиентам. Могу за свой счёт собрать черновик именно под вас "
-    "и показать - если не понравится, ничего не должны. Скажите, вам это "
-    "интересно или сайт вам сейчас не нужен?"
+    "Здравствуйте! Нашёл {name} в картах и заметил, что сайта у вас нет - "
+    "только телефон и адрес. Я делаю под ключ то, что окупается быстрее всего: "
+    "страницу-визитку с услугами и контактами и телеграм-бота, который "
+    "принимает заявки и записи без звонков. Хостинг и домен подключаю сам, вам "
+    "остаётся давать ссылку клиентам. Могу за свой счёт собрать черновик "
+    "именно под вас и показать - если не понравится, ничего не должны. "
+    "Скажите, вам это интересно?"
 )
 
 DRAFT_OUTREACH_EN = (
-    "Hi! I found you on the map and noticed you don't have a website yet - just "
-    "a phone number and an address. I build simple one-page sites end to end: "
-    "your services and contacts, with hosting and the domain wired up, so you "
-    "just hand people a link. Happy to put together a draft for your business "
-    "at my own cost so you can see it first - no obligation either way. Would "
-    "that be useful, or is a website not something you need right now?"
+    "Hi! I found {name} on the map and noticed you don't have a website yet - "
+    "just a phone number and an address. I build the things that pay off "
+    "fastest, end to end: a one-page site with your services and contacts, and "
+    "a Telegram bot that takes bookings and orders without phone calls. Hosting "
+    "and the domain are wired up by me, so you just hand people a link. Happy "
+    "to put together a draft for your business at my own cost so you can see it "
+    "first - no obligation either way. Would that be useful?"
 )
+
+# Короткая версия - для мессенджера: длинное полотно в WhatsApp не читают,
+# да и в ссылку кнопки оно целиком не влезет.
+OFFER_WA_RU = (
+    "Здравствуйте! Нашёл {name} в картах - заметил, что сайта нет. Делаю "
+    "страницы-визитки и телеграм-ботов для заявок под ключ, вместе с хостингом "
+    "и доменом. Могу за свой счёт собрать черновик под вас и показать. "
+    "Интересно?"
+)
+
+OFFER_WA_EN = (
+    "Hi! I found {name} on the map and noticed there's no website. I build "
+    "one-page sites and Telegram bots for bookings end to end, hosting and "
+    "domain included. Happy to put together a draft for you at my own cost so "
+    "you can see it first. Interested?"
+)
+
+
+def business_name(title):
+    """Из заголовка лида "Название - Город" достаёт название."""
+    name = re.split(r"\s+[-\u2014\u2013]\s+", (title or "").strip())[0].strip()
+    return name or "вас"
+
+
+def outreach_text(source, title, short=False):
+    if is_english_source(source):
+        template = OFFER_WA_EN if short else DRAFT_OUTREACH_EN
+    else:
+        template = OFFER_WA_RU if short else DRAFT_OUTREACH_RU
+    return template.format(name=business_name(title))
 
 
 def is_maps_source(source):
@@ -348,6 +383,17 @@ DRAFT_DIRECT_REPLY = (
     "Здравствуйте! Прошу прощения за задержку с ответом - ваше сообщение "
     "потерялось у меня в уведомлениях, увидел только сейчас. Если вопрос ещё "
     "актуален, я на связи и готов продолжить. Подскажите, задача ещё в силе?"
+)
+
+# А это - ответ на письмо в почту. Тут извиняться не за что: чаще всего это
+# ответ на наш же оффер, и извинение за задержку выглядело бы странно. Этот
+# текст уходит по кнопке, поэтому он должен быть готов к отправке как есть.
+DRAFT_MAIL_REPLY = (
+    "Здравствуйте! Спасибо, что ответили - я на связи. Предлагаю не тратить "
+    "ваше время на переговоры вслепую: соберу черновик и покажу его до оплаты, "
+    "чтобы вы смотрели на живой пример, а не на обещания. Подскажите, что "
+    "нужно в первую очередь - страница-визитка, телеграм-бот для заявок или "
+    "что-то другое?"
 )
 
 # ==================== ИСТОЧНИК 1: FL.RU (RSS) ====================
@@ -608,10 +654,12 @@ def template_draft(source, title, details):
     каждый раз заново незачем.
     """
     if is_direct_source(source):
-        return DRAFT_DIRECT_REPLY
+        # Личка на бирже и письмо в почту - разные разговоры, см. тексты выше.
+        return (DRAFT_MAIL_REPLY if "письмо" in (source or "").lower()
+                else DRAFT_DIRECT_REPLY)
 
     if is_maps_source(source):
-        return DRAFT_OUTREACH_EN if is_english_source(source) else DRAFT_OUTREACH_RU
+        return outreach_text(source, title)
 
     text = "%s %s" % (title or "", details or "")
 
@@ -638,6 +686,13 @@ def build_draft(source, title, details, link):
     engine = DRAFT_ENGINE
     if engine == "auto":
         engine = "ai" if ANTHROPIC_API_KEY else "template"
+
+    # Карты - всегда заготовка, даже с ключом. Модель обучена писать ОТКЛИК на
+    # заказ, а тут заказа нет: человек ничего не просил. И главное - именно
+    # этот текст уходит потом по кнопке, поэтому он должен быть предсказуемым
+    # слово в слово, а не каждый раз новым.
+    if is_maps_source(source) or is_direct_source(source):
+        return template_draft(source, title, details)
 
     if engine == "ai":
         draft = generate_draft(source, title, details, link)
@@ -697,14 +752,95 @@ def generate_draft(source, title, details, link):
 # источника), без потолка бот высыпет сотню сообщений подряд и Telegram его
 # просто затротлит. Всё, что сверх потолка, всё равно попадает в seen - то
 # есть повторно не придёт, а в логе будет видно, сколько было отброшено.
-MAX_NOTIFICATIONS_PER_RUN = 15
+MAX_NOTIFICATIONS_PER_RUN = 30
 
 # И потолок на ОДИН источник. Без него источник с самой длинной лентой
 # (RemoteOK отдаёт сотни вакансий за раз) выбирает общий лимит целиком, и
 # лиды с Kwork и Hacker News, которые идут следом, до тебя не доходят.
 MAX_NOTIFICATIONS_PER_SOURCE = 5
 
-_notify_state = {"sent": 0, "skipped": 0, "by_source": {}}
+# У карт потолок свой и заведомо больше: там лид - это не заказ, за который
+# соревнуются, а холодный контакт, и работает он объёмом. Плюс отправка идёт
+# по кнопке, поштучно, поэтому поток в Telegram - это не поток писем.
+MAX_MAPS_PER_RUN = 12
+
+
+def source_cap(source):
+    return MAX_MAPS_PER_RUN if is_maps_source(source) else MAX_NOTIFICATIONS_PER_SOURCE
+
+
+# ==================== ПРИОРИТЕТ ЛИДОВ ====================
+#
+# Раньше лиды уходили в Telegram в том порядке, в каком их нашли источники,
+# и потолок за прогон выбирал тот, кто успел первым. Из-за этого длинная
+# лента вакансий могла вытеснить ровно то, что нужно: телеграм-боты,
+# лендинги и мини-приложения - быстрые задачи, которые закрываются за день.
+# Теперь все находки за прогон сначала складываются в очередь, а уже потом
+# уходят по убыванию приоритета: сверху то, что умеешь делать быстро.
+
+PRIORITY_DIRECT = 100   # человек написал лично и ждёт ответа - всегда первым
+PRIORITY_HOT = 60       # тг-боты, лендинги, мини-аппы
+PRIORITY_WARM = 35      # парсеры, автоматизация, интеграции, сайты
+PRIORITY_MAPS = 30      # холодный контакт с карт (с почтой - выше, см. ниже)
+PRIORITY_PLAIN = 15     # подходит по фильтру, но не профиль
+PRIORITY_HEAVY = 5      # долгая тяжёлая разработка - в конец очереди
+
+# Профиль "быстро закрываю за день": бот, лендинг, мини-апп.
+HOT_MARKERS = (
+    "телеграм-бот", "телеграм бот", "телеграмм бот", "тг-бот", "тг бот", "тгбот",
+    "telegram bot", "telegram-bot", "бот для телеграм", "бот в телеграм",
+    "чат-бот", "чатбот", "chatbot", "chat bot", "discord bot", "slack bot",
+    "aiogram", "telebot", "botfather",
+    "лендинг", "лэндинг", "одностраничник", "одностраничн", "landing page",
+    "landing", "визитк", "сайт-визитка", "one-pager", "onepager",
+    "mini app", "miniapp", "миниапп", "мини-апп", "мини апп", "tma",
+    "web app для телеграм", "телеграм-приложение", "mvp", "под ключ",
+    "prototype", "прототип",
+)
+
+WARM_MARKERS = (
+    "парсер", "парсинг", "спарсить", "scraper", "scraping", "crawler",
+    "автоматизац", "automation", "automate", "скрипт", "script",
+    "интеграц", "integration", "webhook", "вебхук", "api",
+    "google sheets", "гугл таблиц", "excel", "выгрузк", "бот", "bot",
+    "сайт", "website", "web site", "wordpress", "tilda", "тильда",
+    "gpt", "llm", "нейросет", "chatgpt", "ai agent", "ии-агент",
+)
+
+# Долгая разработка: интересно, но это не "первый клиент за день".
+HEAVY_MARKERS = (
+    "микросервис", "microservice", "highload", "высоконагруж", "kubernetes",
+    "devops", "unity", "unreal", "blockchain", "блокчейн", "смарт-контракт",
+    "smart contract", "1с", "1c ", "битрикс", "bitrix", "erp", "sap",
+    "machine learning", "машинное обучение", "computer vision", "нейронную сеть с нуля",
+    "full-time", "полная занятость", "в штат", "team lead", "тимлид",
+    "android studio", "ios приложение", "мобильное приложение", "flutter",
+    "react native", "enterprise",
+)
+
+
+def lead_score(source, title, body):
+    """Чем выше число, тем раньше лид уйдёт в Telegram при упоре в потолок."""
+    low = (source or "").lower()
+    if "личное" in low or "ответили" in low or "личное сообщение" in low:
+        return PRIORITY_DIRECT
+    text = ("%s %s" % (title or "", body or "")).lower()
+    if is_maps_source(source):
+        # Почта = оффер уходит одним нажатием. Телефон = писать руками в
+        # мессенджер. Поэтому контакт с почтой в очереди стоит выше.
+        return PRIORITY_MAPS + (10 if "@" in text else 0)
+    if any(marker in text for marker in HOT_MARKERS):
+        return PRIORITY_HOT
+    if any(marker in text for marker in HEAVY_MARKERS):
+        return PRIORITY_HEAVY
+    if any(marker in text for marker in WARM_MARKERS):
+        return PRIORITY_WARM
+    return PRIORITY_PLAIN
+
+
+# Очередь этого прогона: notify кладёт сюда, flush_notifications отправляет
+# по убыванию приоритета. sent/skipped/by_source считаются уже при отправке.
+_notify_state = {"sent": 0, "skipped": 0, "by_source": {}, "queue": [], "seq": 0}
 
 
 # Заказчики на Hacker News и в Telegram-каналах почти всегда оставляют способ
@@ -744,13 +880,21 @@ _pending_state = None
 
 
 def notify(source, title, description, link, details=None,
-           reply_to=None, reply_subject=None, in_reply_to=None):
+           reply_to=None, reply_subject=None, in_reply_to=None,
+           buttons=None, seen=None, seen_uid=None, send_body=None,
+           priority=None):
     """details - уже собранный текст уведомления. Если он задан, description
     не используется: источник сам решил, что и как показывать (у Kwork,
     например, это цена + рубрика + покупатель отдельными строками).
 
     reply_to - почта, на которую можно ответить письмом. Если она задана и
     черновик получился, к сообщению прицепится кнопка "Отправить письмо".
+    send_body - текст письма, если он отличается от черновика в сообщении.
+    buttons - готовые кнопки-ссылки (WhatsApp, Telegram) отдельным рядом.
+    seen/seen_uid - пометить лид просмотренным ТОЛЬКО если он реально ушёл.
+
+    Само сообщение здесь не отправляется: оно встаёт в очередь прогона и
+    уходит в flush_notifications() по убыванию приоритета.
     """
     body = details if details is not None else (description or "")[:300]
     msg = f"🆕 {source}\n\n{title}"
@@ -769,40 +913,77 @@ def notify(source, title, description, link, details=None,
         draft = build_draft(source, title, body, link)
         if draft:
             # Для карт это не отклик на заказ, а первое обращение к человеку,
-            # который ничего не заказывал - и идти оно должно звонком или в
-            # мессенджер, поштучно. Подпись должна об этом напоминать.
-            label = ("✍️ ЧЕРНОВИК ЗВОНКА / СООБЩЕНИЯ (по одному, не рассылкой):"
+            # который ничего не заказывал. Уходит оно кнопками под сообщением:
+            # на почту - письмом целиком, в WhatsApp - короткой версией.
+            label = ("✍️ ОФФЕР (кнопки ниже отправят его; в WhatsApp - короткой "
+                     "версией):"
                      if is_maps_source(source)
                      else "✍️ ЧЕРНОВИК ОТКЛИКА (скопируй, проверь, отправь):")
             msg += "\n\n" + "-" * 20 + "\n" + label + "\n\n" + draft
 
-    # Кнопка появляется, только если есть КУДА писать и ЧТО писать. У карт её
-    # не бывает намеренно: там телефон, а не почта, и обращаться туда надо
-    # голосом, а не письмом.
-    markup = None
-    if (SEND_BUTTON_ENABLED and _pending_state is not None
-            and reply_to and draft and not is_maps_source(source)):
-        markup = register_send_button(
-            _pending_state, reply_to,
-            reply_subject or ("Re: " + (title or "")[:120]),
-            draft, in_reply_to,
-        )
+    # Кнопка появляется, только если есть КУДА писать и ЧТО писать. Само
+    # письмо кладётся в очередь не здесь, а при отправке сообщения: иначе
+    # очередь заполнялась бы письмами к лидам, которые в Telegram так и не
+    # ушли (упёрлись в потолок), и кнопок к ним не существует.
+    mail = None
+    body_to_send = send_body or draft
+    if SEND_BUTTON_ENABLED and reply_to and body_to_send:
+        mail = {
+            "to": reply_to,
+            "subject": reply_subject or ("Re: " + (title or "")[:120]),
+            "body": body_to_send,
+            "in_reply_to": in_reply_to,
+        }
         msg += "\n\n👉 Кнопка ниже отправит этот текст на %s" % reply_to
 
-    if _notify_state["sent"] >= MAX_NOTIFICATIONS_PER_RUN:
-        _notify_state["skipped"] += 1
-        return False
-
-    from_source = _notify_state["by_source"].get(source, 0)
-    if from_source >= MAX_NOTIFICATIONS_PER_SOURCE:
-        _notify_state["skipped"] += 1
-        return False
-
-    send_telegram(msg, reply_markup=markup)
-    _notify_state["sent"] += 1
-    _notify_state["by_source"][source] = _notify_state["by_source"].get(source, 0) + 1
-    print(f"[+] {source}: {title}")
+    _notify_state["seq"] += 1
+    _notify_state["queue"].append({
+        "source": source,
+        "title": title,
+        "text": msg,
+        "mail": mail,
+        "buttons": list(buttons or []),
+        "seen": seen,
+        "uid": seen_uid,
+        "score": priority if priority is not None else lead_score(source, title, body),
+        "seq": _notify_state["seq"],
+    })
     return True
+
+
+def flush_notifications():
+    """Отправляет накопленное за прогон: сначала самое ценное.
+
+    Потолок теперь режет не "тех, кто пришёл последним", а "тех, кто менее
+    интересен": лид на телеграм-бота или лендинг уходит раньше вакансии на
+    полгода бэкенда, даже если нашёлся позже.
+    """
+    queue = sorted(_notify_state["queue"], key=lambda item: (-item["score"], item["seq"]))
+    _notify_state["queue"] = []
+
+    for item in queue:
+        source = item["source"]
+        from_source = _notify_state["by_source"].get(source, 0)
+        if (_notify_state["sent"] >= MAX_NOTIFICATIONS_PER_RUN
+                or from_source >= source_cap(source)):
+            _notify_state["skipped"] += 1
+            continue
+
+        rows = []
+        if item["mail"] and _pending_state is not None:
+            mail = item["mail"]
+            rows.append([send_button(_pending_state, mail["to"], mail["subject"],
+                                     mail["body"], mail.get("in_reply_to"))])
+        for button in item["buttons"]:
+            rows.append([button])
+        markup = {"inline_keyboard": rows} if rows else None
+
+        send_telegram(item["text"], reply_markup=markup)
+        _notify_state["sent"] += 1
+        _notify_state["by_source"][source] = from_source + 1
+        if item["seen"] is not None and item["uid"]:
+            item["seen"].add(item["uid"])
+        print("[+] %s: %s" % (source, item["title"]))
 
 
 USER_AGENT = "lead-monitor-personal-script/1.0"
@@ -1251,7 +1432,7 @@ def check_kwork_mail(seen):
 SEND_BUTTON_ENABLED = True
 PENDING_FILE = "pending_sends.json"
 PENDING_TTL_DAYS = 7          # ненажатые кнопки протухают
-MAX_SENDS_PER_RUN = 5         # предохранитель: больше пяти писем за раз не уйдёт
+MAX_SENDS_PER_RUN = 15        # предохранитель: больше пятнадцати писем за раз не уйдёт
 
 SMTP_HOST = os.environ.get("SMTP_HOST", "")   # пусто -> выводим из IMAP_HOST
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
@@ -1266,11 +1447,12 @@ def load_pending():
             if isinstance(data, dict):
                 data.setdefault("offset", 0)
                 data.setdefault("items", {})
+                data.setdefault("deferred", [])
                 return data
         except Exception as e:
             print("[send] не смог прочитать %s (%s) - начинаю с чистого листа"
                   % (PENDING_FILE, e))
-    return {"offset": 0, "items": {}}
+    return {"offset": 0, "items": {}, "deferred": []}
 
 
 def save_pending(state):
@@ -1340,19 +1522,33 @@ def telegram_api(method, payload, quiet_errors=()):
         return None
 
 
-def register_send_button(state, to_addr, subject, body, in_reply_to=None):
-    """Кладёт письмо в очередь и отдаёт разметку кнопки для сообщения."""
+def answer_callback(callback_id, text):
+    """Всплывашка над кнопкой. Для отложенных нажатий id уже нет - молчим."""
+    if not callback_id:
+        return
+    telegram_api("answerCallbackQuery",
+                 {"callback_query_id": callback_id, "text": text},
+                 quiet_errors=("query is too old", "query ID is invalid"))
+
+
+def send_button(state, to_addr, subject, body, in_reply_to=None):
+    """Кладёт письмо в очередь и отдаёт ОДНУ кнопку под сообщение."""
     key = uuid.uuid4().hex[:12]
     state.setdefault("items", {})[key] = {
         "to": to_addr, "subject": subject, "body": body,
         "in_reply_to": in_reply_to, "created": time.time(),
     }
+    return {"text": "📤 Отправить письмо", "callback_data": "send:" + key}
+
+
+def register_send_button(state, to_addr, subject, body, in_reply_to=None):
+    """То же самое, но сразу готовой разметкой (для отдельных сообщений)."""
     return {"inline_keyboard": [[
-        {"text": "📤 Отправить письмо", "callback_data": "send:" + key},
+        send_button(state, to_addr, subject, body, in_reply_to),
     ]]}
 
 
-def strip_button(callback):
+def strip_button(chat_id, message_id):
     """Убирает кнопку с уже обработанного сообщения.
 
     Иначе она висит вечно и выглядит как нерешённое дело: всплывашка над
@@ -1360,9 +1556,6 @@ def strip_button(callback):
     видимый признак, что нажатие приняли. Повторное нажатие вреда не нанесёт
     (письмо уже убрано из очереди), но и путать не должно.
     """
-    message = callback.get("message") or {}
-    chat_id = (message.get("chat") or {}).get("id")
-    message_id = message.get("message_id")
     if not chat_id or not message_id:
         return
     telegram_api("editMessageReplyMarkup", {
@@ -1392,7 +1585,7 @@ def process_send_buttons(state):
     print("[send] в очереди писем: %d, нажатий получено: %d (offset %s)"
           % (waiting, len(updates), state.get("offset", 0)))
 
-    if waiting and not updates:
+    if waiting and not updates and not state.get("deferred"):
         # Тишина при непустой очереди подозрительна: либо кнопку правда не
         # нажимали, либо боту мешает вебхук - тогда Telegram отдаёт нажатия
         # ему, а не нам, и getUpdates возвращает пустоту или 409.
@@ -1405,7 +1598,14 @@ def process_send_buttons(state):
         else:
             print("[send] вебхука нет, значит кнопку просто ещё не нажимали")
 
-    sent = 0
+    # Сначала - нажатия, которые прошлый прогон не успел разослать (уперся в
+    # предохранитель). Их нельзя просто "оставить в очереди": позиция чтения
+    # getUpdates уже сдвинута, второй раз то же нажатие Telegram не отдаст, и
+    # без этого списка человек бы жал кнопку, а письмо не уходило никогда.
+    clicks = [(entry.get("key"), entry.get("chat_id"), entry.get("message_id"), None)
+              for entry in state.get("deferred", [])]
+    state["deferred"] = []
+
     for update in updates:
         state["offset"] = max(state.get("offset", 0),
                               update.get("update_id", 0) + 1)
@@ -1417,23 +1617,28 @@ def process_send_buttons(state):
         if not payload.startswith("send:"):
             continue
 
-        key = payload[len("send:"):]
+        message = callback.get("message") or {}
+        clicks.append((
+            payload[len("send:"):],
+            (message.get("chat") or {}).get("id"),
+            message.get("message_id"),
+            callback.get("id"),
+        ))
+
+    sent = 0
+    for key, chat_id, message_id, callback_id in clicks:
         item = state.get("items", {}).pop(key, None)
         if item is None:
-            telegram_api("answerCallbackQuery", {
-                "callback_query_id": callback.get("id"),
-                "text": "Это письмо уже отправлено или устарело",
-            }, quiet_errors=("query is too old", "query ID is invalid"))
-            strip_button(callback)
+            answer_callback(callback_id, "Это письмо уже отправлено или устарело")
+            strip_button(chat_id, message_id)
             continue
 
         if sent >= MAX_SENDS_PER_RUN:
-            # Возвращаем в очередь: отправим на следующем прогоне.
+            # Возвращаем и письмо, и само нажатие: отправим на следующем прогоне.
             state["items"][key] = item
-            telegram_api("answerCallbackQuery", {
-                "callback_query_id": callback.get("id"),
-                "text": "Отправлю на следующем прогоне",
-            })
+            state["deferred"].append({"key": key, "chat_id": chat_id,
+                                      "message_id": message_id})
+            answer_callback(callback_id, "Отправлю на следующем прогоне")
             continue
 
         ok = send_email(item["to"], item["subject"], item["body"],
@@ -1441,17 +1646,17 @@ def process_send_buttons(state):
         if ok:
             sent += 1
 
-        telegram_api("answerCallbackQuery", {
-            "callback_query_id": callback.get("id"),
-            "text": "Отправлено" if ok else "Не отправилось, смотри лог",
-        }, quiet_errors=("query is too old", "query ID is invalid"))
-        strip_button(callback)
+        answer_callback(callback_id, "Отправлено" if ok else "Не отправилось, смотри лог")
+        strip_button(chat_id, message_id)
         head = "✅ Письмо отправлено" if ok else "❌ Не удалось отправить"
         send_telegram("%s\n\nКому: %s\nТема: %s\n\n%s"
                       % (head, item["to"], item["subject"], item["body"]))
 
     if sent:
         print("[send] отправлено писем за прогон: %d" % sent)
+    if state.get("deferred"):
+        print("[send] нажатий отложено на следующий прогон: %d"
+              % len(state["deferred"]))
 
 
 # ---------------------- ЛИЧНЫЕ ПИСЬМА: ТЕБЕ ОТВЕТИЛИ ----------------------
@@ -1577,8 +1782,19 @@ def check_personal_mail(seen):
                 body = get_email_body(email.message_from_bytes(body_data[0][1]))
             text = strip_html(body, keep_newlines=True)[:600]
 
+            # Самое важное нажатие из всех: человек уже написал и ждёт. Ответ
+            # уходит той же перепиской (In-Reply-To), а не отдельным письмом,
+            # и тема берётся его же - "Re: ..." он узнает сразу.
+            address = parseaddr(sender)[1]
+            reply_subject = subject or "(без темы)"
+            if not reply_subject.lower().startswith("re:"):
+                reply_subject = "Re: " + reply_subject
+
             notify("Личное письмо ⚡ ТЕБЕ ОТВЕТИЛИ", subject or "(без темы)",
-                   "", "", details="От: %s\n\n%s" % (sender, text))
+                   "", "", details="От: %s\n\n%s" % (sender, text),
+                   reply_to=address or None,
+                   reply_subject=reply_subject,
+                   in_reply_to=head_msg.get("Message-ID"))
 
     except Exception as e:
         print("[mail] ошибка (%s): %s" % (type(e).__name__, e))
@@ -2131,9 +2347,12 @@ def check_remoteok(seen):
 # себе не лид, обращение к нему - спам. Отсутствие сайта - конкретная причина
 # написать конкретному человеку и конкретная вещь, которую можно сделать.
 #
-# ВАЖНО про канал: такие контакты берут ЗВОНКОМ или сообщением в мессенджер,
-# поштучно. Массовая рассылка по этому списку с личной почты угробит ящик и
-# ничего не принесёт.
+# ВАЖНО про канал: оффер уходит ПОШТУЧНО, по нажатию кнопки под конкретным
+# заведением - письмом, если в картах есть почта, или сообщением в WhatsApp,
+# если есть только телефон. Списка "отправить всем" тут нет намеренно: письмо
+# с личного ящика десяткам незнакомых адресов за раз - это ровно то, за что
+# почтовики режут репутацию отправителя, и потерять этот ящик нельзя (на нём
+# висят Kwork и FL.ru). Кнопка на каждое заведение - это и есть предохранитель.
 #
 # Данные - OpenStreetMap через Overpass API: открытые, без ключа, без
 # регистрации и без привязки карты.
@@ -2149,22 +2368,27 @@ OSM_MAX_RESULTS = 60
 OSM_AMENITIES = ("cafe|restaurant|bar|fast_food|dentist|doctors|clinic|"
                  "veterinary|driving_school|pharmacy")
 
+# По каким тегам считаем, что до заведения вообще можно достучаться.
+# Порядок важен: почта идёт первой, потому что оффер на неё уходит кнопкой.
+OSM_CONTACT_KEYS = ("email", "contact:email", "phone", "contact:phone")
+
 # Города обходятся по очереди - по одному за прогон, чтобы не долбить
 # бесплатный Overpass. Список правь свободно: bbox это (юг, запад, север,
 # восток), "lang" решает, на каком языке будет черновик обращения.
+# "cc" - код страны: нужен, чтобы собрать ссылку wa.me из местного номера.
 OSM_CITIES = [
-    {"name": "Москва",           "lang": "ru", "bbox": (55.55, 37.35, 55.92, 37.85)},
-    {"name": "Санкт-Петербург",  "lang": "ru", "bbox": (59.80, 30.10, 60.09, 30.55)},
-    {"name": "Казань",           "lang": "ru", "bbox": (55.70, 48.98, 55.87, 49.28)},
-    {"name": "Екатеринбург",     "lang": "ru", "bbox": (56.75, 60.50, 56.92, 60.72)},
-    {"name": "Новосибирск",      "lang": "ru", "bbox": (54.95, 82.80, 55.13, 83.10)},
-    {"name": "New York",         "lang": "en", "bbox": (40.55, -74.05, 40.92, -73.70)},
-    {"name": "Los Angeles",      "lang": "en", "bbox": (33.90, -118.50, 34.20, -118.15)},
-    {"name": "Chicago",          "lang": "en", "bbox": (41.75, -87.85, 42.02, -87.55)},
-    {"name": "Austin",           "lang": "en", "bbox": (30.15, -97.95, 30.45, -97.60)},
-    {"name": "Miami",            "lang": "en", "bbox": (25.70, -80.30, 25.86, -80.13)},
-    {"name": "London",           "lang": "en", "bbox": (51.42, -0.25, 51.60, 0.02)},
-    {"name": "Berlin",           "lang": "en", "bbox": (52.42, 13.25, 52.58, 13.55)},
+    {"name": "Москва",           "lang": "ru", "cc": "7",  "bbox": (55.55, 37.35, 55.92, 37.85)},
+    {"name": "Санкт-Петербург",  "lang": "ru", "cc": "7",  "bbox": (59.80, 30.10, 60.09, 30.55)},
+    {"name": "Казань",           "lang": "ru", "cc": "7",  "bbox": (55.70, 48.98, 55.87, 49.28)},
+    {"name": "Екатеринбург",     "lang": "ru", "cc": "7",  "bbox": (56.75, 60.50, 56.92, 60.72)},
+    {"name": "Новосибирск",      "lang": "ru", "cc": "7",  "bbox": (54.95, 82.80, 55.13, 83.10)},
+    {"name": "New York",         "lang": "en", "cc": "1",  "bbox": (40.55, -74.05, 40.92, -73.70)},
+    {"name": "Los Angeles",      "lang": "en", "cc": "1",  "bbox": (33.90, -118.50, 34.20, -118.15)},
+    {"name": "Chicago",          "lang": "en", "cc": "1",  "bbox": (41.75, -87.85, 42.02, -87.55)},
+    {"name": "Austin",           "lang": "en", "cc": "1",  "bbox": (30.15, -97.95, 30.45, -97.60)},
+    {"name": "Miami",            "lang": "en", "cc": "1",  "bbox": (25.70, -80.30, 25.86, -80.13)},
+    {"name": "London",           "lang": "en", "cc": "44", "bbox": (51.42, -0.25, 51.60, 0.02)},
+    {"name": "Berlin",           "lang": "en", "cc": "49", "bbox": (52.42, 13.25, 52.58, 13.55)},
 ]
 
 
@@ -2176,21 +2400,63 @@ def pick_osm_city():
 
 
 def build_osm_query(bbox):
-    """Overpass QL: с именем и телефоном, но БЕЗ сайта.
+    """Overpass QL: с именем и хоть каким-то контактом, но БЕЗ сайта.
 
-    Телефон требуется на стороне сервера: без него лид бесполезен, звонить
-    некуда. Отдельные ветки для phone и contact:phone - в OSM встречаются оба
-    написания, а ИЛИ внутри одного фильтра Overpass не умеет.
+    Контакт требуется на стороне сервера: без него лид бесполезен, обращаться
+    некуда. Веток много, потому что ИЛИ внутри одного фильтра Overpass не
+    умеет, а в OSM один и тот же контакт пишут по-разному (phone и
+    contact:phone, email и contact:email). Почта тут ценнее телефона: оффер
+    на неё уходит одним нажатием кнопки, без ручной работы.
     """
     box = "%s,%s,%s,%s" % bbox
     parts = []
     for selector in ('["amenity"~"^(%s)$"]' % OSM_AMENITIES, '["shop"]'):
-        for phone_key in ("phone", "contact:phone"):
+        for contact_key in OSM_CONTACT_KEYS:
             parts.append(
                 'nwr["name"][!"website"][!"contact:website"]["%s"]%s(%s);'
-                % (phone_key, selector, box)
+                % (contact_key, selector, box)
             )
     return "[out:json][timeout:60];(%s);out center %d;" % ("".join(parts), OSM_MAX_RESULTS)
+
+
+def osm_phone_digits(phone, cc):
+    """Телефон из OSM -> цифры для ссылки wa.me.
+
+    В OSM номер чаще всего уже международный ("+7 812 123-45-67"), но
+    попадаются и местные записи ("8 (812) ...", "812 123-45-67"). Отсюда
+    код страны города: без него ссылка ведёт в никуда.
+    """
+    first = re.split(r"[;,/]", phone or "")[0]
+    digits = re.sub(r"\D", "", first)
+    if not digits:
+        return ""
+    if not first.strip().startswith("+"):
+        if cc == "7" and len(digits) == 11 and digits.startswith("8"):
+            digits = "7" + digits[1:]
+        elif not digits.startswith(cc):
+            digits = cc + digits.lstrip("0")
+    return digits if 8 <= len(digits) <= 15 else ""
+
+
+def whatsapp_button(phone, cc, text):
+    """Кнопка-ссылка: открывает чат в WhatsApp с уже готовым текстом.
+
+    Одно нажатие - и оффер набран, остаётся отправить. Telegram не пускает в
+    кнопки схему tel:, поэтому звонок остаётся ручным, а вот мессенджер
+    открывается сразу с текстом.
+    """
+    digits = osm_phone_digits(phone, cc)
+    if not digits:
+        return None
+    # Кириллица в ссылке раздувается в шесть раз (%D0%97 на символ), а
+    # слишком длинную ссылку Telegram в кнопку не примет - поэтому режем
+    # по длине УЖЕ закодированного текста, а не исходного.
+    encoded = quote(text)
+    while len(encoded) > 1500 and text:
+        text = text[:-40].rsplit(" ", 1)[0]
+        encoded = quote(text)
+    url = "https://wa.me/%s?text=%s" % (digits, encoded)
+    return {"text": "💬 Оффер в WhatsApp", "url": url}
 
 
 def overpass_get(query):
@@ -2227,41 +2493,67 @@ def check_osm_no_website(seen):
     source = ("Maps — business without a website" if city["lang"] == "en"
               else "Карты — бизнес без сайта")
 
+    # Одно и то же заведение приходит несколько раз: в запросе несколько
+    # веток (по почте и по телефону), и Overpass их просто объединяет.
+    queued = set()
+
     for element in elements:
         tags = element.get("tags") or {}
         name = (tags.get("name") or "").strip()
         phone = (tags.get("phone") or tags.get("contact:phone") or "").strip()
-        if not name or not phone:
+        mail = (tags.get("email") or tags.get("contact:email") or "").strip()
+        mail = re.split(r"[;,\s]", mail)[0] if mail else ""
+        if not name or not (phone or mail):
             continue
 
         uid = "osm:%s/%s" % (element.get("type"), element.get("id"))
-        if uid in seen:
+        if uid in seen or uid in queued:
             continue
+        queued.add(uid)
 
         category = tags.get("amenity") or tags.get("shop") or ""
         street = " ".join(filter(None, [tags.get("addr:street"),
                                         tags.get("addr:housenumber")])).strip()
 
-        details = ["📞 " + phone]
+        details = []
+        if mail:
+            details.append("✉️ " + mail)
+        if phone:
+            details.append("📞 " + phone)
         if street:
             details.append("📍 " + street)
         if category:
             details.append("🏷 " + category)
 
+        title = "%s — %s" % (name, city["name"])
         link = "https://www.openstreetmap.org/%s/%s" % (element.get("type"),
                                                         element.get("id"))
-        # Помечаем просмотренным ТОЛЬКО то, что реально ушло в Telegram.
-        # У остальных источников наоборот - там лид протухает сам (вакансию
-        # закрыли, заказ разобрали), и второй раз он не нужен. А кафе без
-        # сайта останется без сайта и через месяц: если списать со счёта всё,
-        # что не влезло в потолок, мы сожжём полсотни живых контактов за
-        # прогон. Не влезло - вернёмся к нему на следующем круге по городам.
-        if not notify(source, "%s — %s" % (name, city["name"]), "", link,
-                      details="\n".join(details)):
-            print("[osm] потолок выбран, остальные %s оставляю на следующий круг"
-                  % city["name"])
-            return
-        seen.add(uid)
+
+        # Кнопки: почта - оффер уходит одним нажатием прямо из Telegram;
+        # телефон - открывается WhatsApp с уже набранным текстом.
+        buttons = []
+        if phone:
+            wa = whatsapp_button(phone, city.get("cc", "7"),
+                                 outreach_text(source, title, short=True))
+            if wa:
+                buttons.append(wa)
+
+        subject = ("A website for %s" % name if city["lang"] == "en"
+                   else "Сайт для %s" % name)
+
+        # Помечаем просмотренным ТОЛЬКО то, что реально ушло в Telegram (это
+        # делает сам notify через seen/seen_uid). У остальных источников
+        # наоборот - там лид протухает сам (вакансию закрыли, заказ
+        # разобрали), и второй раз он не нужен. А кафе без сайта останется
+        # без сайта и через месяц: если списать со счёта всё, что не влезло
+        # в потолок, мы сожжём полсотни живых контактов за прогон. Не
+        # влезло - вернёмся к нему на следующем круге по городам.
+        notify(source, title, "", link,
+               details="\n".join(details),
+               reply_to=mail or None,
+               reply_subject=subject,
+               buttons=buttons,
+               seen=seen, seen_uid=uid)
 
 
 # ---------------------- ОДИН ЗАПУСК ----------------------
@@ -2390,13 +2682,20 @@ def main():
         except Exception as e:
             print(f"[main] ошибка в {check_fn.__name__}: {e}")
 
+    # Всё найденное за прогон уходит здесь, по убыванию приоритета: сначала
+    # личные сообщения и быстрые задачи (боты, лендинги, мини-аппы), потом
+    # остальное. Отправляем только после обхода всех источников - иначе
+    # первый же источник занял бы весь потолок, как это и было раньше.
+    flush_notifications()
+
     save_seen(seen)
     save_pending(_pending_state)
     if _draft_state["made"]:
         print(f"[draft] черновиков через Claude API: {_draft_state['made']}")
     if _notify_state["skipped"]:
         print(f"[!] отправлено {_notify_state['sent']}, отброшено по потолку "
-              f"{_notify_state['skipped']}. Они уже в seen и повторно не придут.")
+              f"{_notify_state['skipped']} (менее приоритетные). Лиды с карт "
+              f"вернутся на следующем круге, остальные - нет: они уже в seen.")
     print(f"Проверка завершена. Всего в памяти: {len(seen)}.")
 
 

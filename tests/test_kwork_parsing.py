@@ -27,6 +27,24 @@ lm.send_telegram = lambda text, reply_markup=None: sent.append(text)
 failures = []
 
 
+def notify_now(*args, **kwargs):
+    """notify + немедленная отправка.
+
+    В бою между ними стоит очередь приоритетов: сначала бот обходит все
+    источники, и только потом отправляет накопленное, начиная с самого
+    ценного. В большинстве проверок ниже интересна именно доставка, поэтому
+    очередь тут же и разгребается.
+    """
+    result = lm.notify(*args, **kwargs)
+    lm.flush_notifications()
+    return result
+
+
+def reset_limits():
+    lm._notify_state.update({"sent": 0, "skipped": 0, "by_source": {},
+                             "queue": [], "seq": 0})
+
+
 def check(condition, message):
     if condition:
         print("  ok  - " + message)
@@ -73,6 +91,7 @@ check(not any(p["id"] in ("441", "5") for p in projects),
 print("\n3. Уведомление собирается читаемым")
 sent[:] = []
 lm.handle_kwork_digest(set(), "Новые проекты на бирже Kwork", digest)
+lm.flush_notifications()
 check(len(sent) == 2, "отправлено 2 уведомления (получено %d)" % len(sent))
 if sent:
     msg = sent[0]
@@ -87,8 +106,10 @@ print("\n4. Дедупликация по номеру заказа, а не п�
 seen = set()
 sent[:] = []
 lm.handle_kwork_digest(seen, "Новые проекты на бирже Kwork", digest)
+lm.flush_notifications()
 first_round = len(sent)
 lm.handle_kwork_digest(seen, "Новые проекты на бирже Kwork", digest)
+lm.flush_notifications()
 check(len(sent) == first_round, "повторный дайджест с теми же заказами не дублирует уведомления")
 
 print("\n5. Личное сообщение от покупателя доходит ВСЕГДА, мимо ключевых слов")
@@ -103,6 +124,7 @@ check(lm.matches_keywords(lm.strip_html(message_mail)),
       "из подвала 'Ответить на сайте' - и уходило нечитаемым куском")
 sent[:] = []
 lm.handle_kwork_direct(set(), "Новые сообщения на Kwork.ru", message_mail)
+lm.flush_notifications()
 check(len(sent) == 1, "уведомление всё равно отправлено (получено %d)" % len(sent))
 if sent:
     msg = sent[0]
@@ -148,7 +170,7 @@ check(not lm.wants_draft("SuperJob"), "SuperJob - черновика нет")
 print("\n9. Черновик попадает в сообщение")
 lm.build_draft = lambda source, title, details, link: "Готов сделать бота. Когда нужен результат?"
 sent[:] = []
-lm.notify("Kwork", "Нужен простой тг-бот для отзывов", "", "https://kwork.ru/new_offer?project=1", details="💰 2 000 Р")
+notify_now("Kwork", "Нужен простой тг-бот для отзывов", "", "https://kwork.ru/new_offer?project=1", details="💰 2 000 Р")
 check(len(sent) == 1, "уведомление отправлено")
 if sent:
     print("  --- как это придёт в Telegram ---")
@@ -158,7 +180,7 @@ if sent:
     check("Готов сделать бота" in sent[0], "текст черновика на месте")
 
 sent[:] = []
-lm.notify("FL.ru", "Небольшой модуль", "", "https://www.fl.ru/projects/1/", details="💰 15 000 ₽")
+notify_now("FL.ru", "Небольшой модуль", "", "https://www.fl.ru/projects/1/", details="💰 15 000 ₽")
 check(sent and "ЧЕРНОВИК" not in sent[0], "к заказу с FL.ru черновик не прикладывается")
 
 lm.build_draft = real_build_draft   # вернуть настоящий на остальные проверки
@@ -212,6 +234,13 @@ draft = lm.build_draft("Kwork — ЛИЧНОЕ ⚡", "Покупатель vkira
 check("прошу прощения" in draft.lower(), "это извинение за задержку, а не отклик")
 check("покажу рабочий результат" not in draft.lower(), "нет текста отклика на заказ")
 
+mail_draft = lm.build_draft("Личное письмо ⚡ ТЕБЕ ОТВЕТИЛИ", "Re: сайт", "", "")
+check("прошу прощения" not in mail_draft.lower(),
+      "в ответе на письмо извинений за задержку нет - это ответ на наш же оффер")
+check("телеграм-бот" in mail_draft.lower(),
+      "ответ сразу предлагает то, что делаем быстро")
+print("  | " + mail_draft)
+
 print("\n14. Платный движок падает - лид всё равно уходит с заготовкой")
 lm.ANTHROPIC_API_KEY = "sk-test"
 lm.generate_draft = lambda *a, **k: None    # как будто кончились кредиты
@@ -253,6 +282,7 @@ lm.hn_algolia_get = lambda path, params: (
                "title": "Ask HN: Freelancer? Seeking freelancer? (August 2026)"}]}
     if params.get("tags") == "story" else {"hits": hits})
 lm.check_hn_freelance(set())
+lm.flush_notifications()
 check(len(sent) == 1, "отправлен только заказчик, не соискатель (получено %d)" % len(sent))
 if sent:
     check("news.ycombinator.com/item?id=1" in sent[0], "ссылка на комментарий заказчика")
@@ -284,14 +314,13 @@ for text, why in traps:
     check(not lm.matches_keywords(text, lm.KEYWORDS_EN), "не поймался %s" % why)
 
 print("\n19. Один источник не съедает весь лимит за прогон")
-lm._notify_state["sent"] = 0
-lm._notify_state["skipped"] = 0
-lm._notify_state["by_source"] = {}
+reset_limits()
 sent[:] = []
 for i in range(30):
     lm.notify("RemoteOK", "Job %d" % i, "", "")
 for i in range(3):
     lm.notify("Hacker News — Seeking freelancer", "Client %d" % i, "", "")
+lm.flush_notifications()
 from_remoteok = sum(1 for m in sent if "RemoteOK" in m)
 from_hn = sum(1 for m in sent if "Hacker News" in m)
 check(from_remoteok <= lm.MAX_NOTIFICATIONS_PER_SOURCE,
@@ -335,7 +364,7 @@ check(lm.extract_contacts("write to info@kwork.ru") == "",
 
 sent[:] = []
 lm.build_draft = lambda *a, **k: None
-lm.notify("Hacker News — Seeking freelancer", "SEEKING FREELANCER | Python scraper",
+notify_now("Hacker News — Seeking freelancer", "SEEKING FREELANCER | Python scraper",
           "", "https://news.ycombinator.com/item?id=1", details=hn_text)
 check(sent and "📬 Контакт: sarah@acmelabs.io" in sent[0], "контакт попал в сообщение")
 if sent:
@@ -364,7 +393,9 @@ q = lm.build_osm_query((55.55, 37.35, 55.92, 37.85))
 check('[!"website"]' in q and '[!"contact:website"]' in q,
       "запрос требует ОТСУТСТВИЯ сайта")
 check('["phone"]' in q and '["contact:phone"]' in q,
-      "телефон обязателен - иначе звонить некуда")
+      "телефон берём - в мессенджер оффер уходит по нему")
+check('["email"]' in q and '["contact:email"]' in q,
+      "почту тоже просим: на неё оффер уходит одной кнопкой")
 check('55.55,37.35,55.92,37.85' in q, "рамка города подставлена")
 
 overpass_answer = {"elements": [
@@ -379,11 +410,10 @@ overpass_answer = {"elements": [
 lm.overpass_get = lambda query: overpass_answer
 lm.pick_osm_city = lambda: {"name": "Москва", "lang": "ru",
                             "bbox": (55.55, 37.35, 55.92, 37.85)}
-lm._notify_state["sent"] = 0
-lm._notify_state["skipped"] = 0
-lm._notify_state["by_source"] = {}
+reset_limits()
 sent[:] = []
 lm.check_osm_no_website(set())
+lm.flush_notifications()
 check(len(sent) == 1, "отправлено только пригодное заведение (получено %d)" % len(sent))
 if sent:
     print("  --- как это придёт ---")
@@ -399,10 +429,10 @@ if sent:
 print("\n24. Для американского города обращение по-английски")
 lm.pick_osm_city = lambda: {"name": "Austin", "lang": "en",
                             "bbox": (30.15, -97.95, 30.45, -97.60)}
-lm._notify_state["by_source"] = {}
-lm._notify_state["sent"] = 0
+reset_limits()
 sent[:] = []
 lm.check_osm_no_website(set())
+lm.flush_notifications()
 check(sent and "don't have a website" in sent[0], "английское обращение")
 check(sent and "Здравствуйте" not in sent[0], "русского текста нет")
 
@@ -422,7 +452,8 @@ check(len(set(seen_cities)) == len(lm.OSM_CITIES),
 check(seen_cities[0] != seen_cities[1], "соседние прогоны берут разные города")
 
 print("\n26. Подпись черновика различает отклик и холодное обращение")
-check("ЗВОНКА / СООБЩЕНИЯ" in sent[0], "у карт - звонок/сообщение, не отклик")
+check("ОФФЕР" in sent[0] and "ЧЕРНОВИК ОТКЛИКА" not in sent[0],
+      "у карт - оффер под кнопку, а не отклик на заказ")
 
 print("\n27. Карты: лиды сверх потолка НЕ сжигаются")
 many = {"elements": [
@@ -435,34 +466,37 @@ lm.pick_osm_city = lambda: {"name": "Москва", "lang": "ru",
                             "bbox": (55.55, 37.35, 55.92, 37.85)}
 
 seen_store = set()
-lm._notify_state["sent"] = 0
-lm._notify_state["skipped"] = 0
-lm._notify_state["by_source"] = {}
+reset_limits()
 sent[:] = []
 lm.check_osm_no_website(seen_store)
+lm.flush_notifications()
 first_round = len(sent)
-check(first_round == lm.MAX_NOTIFICATIONS_PER_SOURCE,
-      "за прогон ушло ровно %d (получено %d)" % (lm.MAX_NOTIFICATIONS_PER_SOURCE, first_round))
+check(first_round == lm.MAX_MAPS_PER_RUN,
+      "за прогон ушло ровно %d (получено %d)" % (lm.MAX_MAPS_PER_RUN, first_round))
 check(len(seen_store) == first_round,
       "в seen попали ТОЛЬКО отправленные: %d из 20" % len(seen_store))
 
 # следующий круг по тому же городу - должны прийти СЛЕДУЮЩИЕ, а не те же
-lm._notify_state["sent"] = 0
-lm._notify_state["skipped"] = 0
-lm._notify_state["by_source"] = {}
+reset_limits()
 sent[:] = []
 lm.check_osm_no_website(seen_store)
-check(len(sent) == lm.MAX_NOTIFICATIONS_PER_SOURCE, "на втором круге снова 5")
-check("Кафе 5" in sent[0], "пришли следующие по списку, а не повтор (%s)"
-      % sent[0].splitlines()[2])
-check(len(seen_store) == first_round * 2, "накопилось 10 просмотренных")
+lm.flush_notifications()
+check(len(sent) == 20 - first_round, "на втором круге пришёл остаток (%d)" % len(sent))
+check(("Кафе %d" % first_round) in sent[0],
+      "пришли следующие по списку, а не повтор (%s)" % sent[0].splitlines()[2])
+check(len(seen_store) == 20, "все 20 просмотрены за два круга")
 
-print("\n28. У остальных источников поведение не изменилось")
-lm._notify_state["sent"] = 0
-lm._notify_state["by_source"] = {}
-check(lm.notify("Kwork", "Тест", "", "") is True, "notify сообщает об отправке")
+print("\n28. У остальных источников потолок прежний")
+reset_limits()
+sent[:] = []
+check(notify_now("Kwork", "Тест", "", "") is True, "лид принят в очередь")
+check(len(sent) == 1, "и ушёл в Telegram")
+
 lm._notify_state["by_source"]["Kwork"] = lm.MAX_NOTIFICATIONS_PER_SOURCE
-check(lm.notify("Kwork", "Тест2", "", "") is False, "и о том, что упёрся в потолок")
+sent[:] = []
+notify_now("Kwork", "Тест2", "", "")
+check(not sent and lm._notify_state["skipped"] == 1,
+      "упёрлись в потолок источника - сообщение не ушло")
 
 print("\n29. Отличаем живого человека от рассылки")
 # рассылки и роботы - настоящие отправители из ящика
@@ -490,11 +524,10 @@ for sender, headers in humans:
 
 print("\n30. Ответ живого человека приходит громко и без фильтра слов")
 sent[:] = []
-lm._notify_state["sent"] = 0
-lm._notify_state["by_source"] = {}
+reset_limits()
 reply_text = "Hi! Yes, still looking. Can you do it by next Friday?"
 check(not lm.matches_keywords(reply_text), "по ключевым словам такой ответ НЕ проходит")
-lm.notify("Личное письмо ⚡ ТЕБЕ ОТВЕТИЛИ", "Re: your message", "", "",
+notify_now("Личное письмо ⚡ ТЕБЕ ОТВЕТИЛИ", "Re: your message", "", "",
           details="От: Sarah Chen <sarah@acmelabs.io>\n\n" + reply_text)
 check(len(sent) == 1, "уведомление всё равно отправлено")
 if sent:
@@ -557,24 +590,156 @@ mails[:] = []
 lm.process_send_buttons(state)
 check(len(mails) == 0, "второй раз письмо не уходит")
 
-print("\n34. Кнопка не вешается там, где писать некуда или незачем")
+print("\n34. Кнопка вешается там и только там, где есть куда писать")
 lm._pending_state = {"offset": 0, "items": {}}
 lm.send_telegram = lambda text, reply_markup=None: sent.append((text, reply_markup))
 sent[:] = []
-lm._notify_state["sent"] = 0
-lm._notify_state["by_source"] = {}
-lm.notify("Hacker News — Seeking freelancer", "SEEKING FREELANCER | need a scraper",
-          "", "", details="write me", reply_to="client@acme.io")
+reset_limits()
+notify_now("Hacker News — Seeking freelancer", "SEEKING FREELANCER | need a scraper",
+           "", "", details="write me", reply_to="client@acme.io")
 check(sent and sent[0][1] is not None, "у лида с почтой кнопка есть")
 
 sent[:] = []
-lm.notify("Карты — бизнес без сайта", "Кофейня — Москва", "", "",
-          details="телефон +7 495 000", reply_to="cafe@example.com")
-check(sent and sent[0][1] is None, "у карт кнопки нет: там телефон, а не почта")
-
-sent[:] = []
-lm.notify("FL.ru", "Заказ без контакта", "", "", details="контакта нет")
+notify_now("FL.ru", "Заказ без контакта", "", "", details="контакта нет")
 check(sent and sent[0][1] is None, "без адреса кнопки нет")
+
+print("\n35. Карты: оффер в компанию уходит одним нажатием")
+lm._pending_state = {"offset": 0, "items": {}}
+sent[:] = []
+reset_limits()
+overpass_answer = {"elements": [
+    {"type": "node", "id": 777, "tags": {
+        "name": "Кофейня Ромашка", "amenity": "cafe",
+        "email": "hello@romashka.ru", "phone": "+7 495 111-22-33"}},
+    {"type": "node", "id": 888, "tags": {           # только телефон
+        "name": "Шаверма", "amenity": "fast_food", "phone": "8 (812) 123-45-67"}},
+]}
+lm.overpass_get = lambda query: overpass_answer
+lm.pick_osm_city = lambda: {"name": "Санкт-Петербург", "lang": "ru", "cc": "7",
+                            "bbox": (59.80, 30.10, 60.09, 30.55)}
+lm.check_osm_no_website(set())
+lm.flush_notifications()
+check(len(sent) == 2, "оба заведения дошли (получено %d)" % len(sent))
+
+with_mail = [m for m in sent if "Кофейня Ромашка" in m[0]]
+check(len(with_mail) == 1, "лид с почтой на месте")
+if with_mail:
+    text, markup = with_mail[0]
+    print("  --- как это придёт ---")
+    for line in text.splitlines():
+        print("  | " + line)
+    labels = [b["text"] for row in (markup or {}).get("inline_keyboard", []) for b in row]
+    print("  | кнопки: %s" % labels)
+    check(any("Отправить письмо" in x for x in labels), "кнопка отправки письма есть")
+    check(any("WhatsApp" in x for x in labels), "кнопка WhatsApp тоже есть")
+    queued = list(lm._pending_state["items"].values())
+    check(len(queued) == 1, "письмо положено в очередь под кнопку")
+    if queued:
+        check(queued[0]["to"] == "hello@romashka.ru", "адресат - почта из карт")
+        check(queued[0]["subject"] == "Сайт для Кофейня Ромашка",
+              "тема письма про конкретную компанию (%s)" % queued[0]["subject"])
+        check("Кофейня Ромашка" in queued[0]["body"],
+              "в тексте оффера есть название компании")
+        check("телеграм-бот" in queued[0]["body"],
+              "оффер начинается с того, что делаем быстро: бот и лендинг")
+
+phone_only = [m for m in sent if "Шаверма" in m[0]]
+check(len(phone_only) == 1, "лид с одним телефоном тоже дошёл")
+if phone_only:
+    markup = phone_only[0][1] or {}
+    buttons = [b for row in markup.get("inline_keyboard", []) for b in row]
+    check(len(buttons) == 1 and "url" in buttons[0],
+          "без почты остаётся только ссылка в мессенджер")
+    if buttons and "url" in buttons[0]:
+        check(buttons[0]["url"].startswith("https://wa.me/78121234567?text="),
+              "местный номер превращён в международный (%s)" % buttons[0]["url"][:45])
+        check("%D0%A8%D0%B0%D0%B2%D0%B5%D1%80%D0%BC%D0%B0" in buttons[0]["url"],
+              "название компании подставлено прямо в текст сообщения")
+
+print("\n36. Номера телефонов из карт превращаются в ссылки")
+check(lm.osm_phone_digits("+7 (950) 002-05-99", "7") == "79500020599", "международный номер")
+check(lm.osm_phone_digits("8 812 123 45 67", "7") == "78121234567", "русская восьмёрка")
+check(lm.osm_phone_digits("(305) 555-1234", "1") == "13055551234", "местный номер США")
+check(lm.osm_phone_digits("+49 30 1234567", "49") == "49301234567", "Берлин")
+check(lm.osm_phone_digits("+7 495 111-22-33; +7 495 111-22-34", "7") == "74951112233",
+      "из списка номеров берётся первый")
+check(lm.osm_phone_digits("звоните", "7") == "", "мусор вместо номера - без кнопки")
+check(lm.whatsapp_button("звоните", "7", "текст") is None, "кнопки на мусор не будет")
+
+print("\n37. Быстрые задачи уходят раньше тяжёлых")
+lm.send_telegram = lambda text, reply_markup=None: sent.append(text)
+sent[:] = []
+reset_limits()
+lm.MAX_NOTIFICATIONS_PER_RUN, saved_run_cap = 3, lm.MAX_NOTIFICATIONS_PER_RUN
+lm.notify("RemoteOK", "Senior Kubernetes microservices engineer", "", "")
+lm.notify("RemoteOK", "Unity game developer, full-time", "", "")
+lm.notify("Kwork", "Нужен парсер сайта с выгрузкой в Excel", "", "")
+lm.notify("Kwork", "Нужен телеграм-бот для записи клиентов", "", "")
+lm.notify("Личное письмо ⚡ ТЕБЕ ОТВЕТИЛИ", "Re: your message", "", "",
+          details="Sarah: still looking?")
+lm.flush_notifications()
+lm.MAX_NOTIFICATIONS_PER_RUN = saved_run_cap
+check(len(sent) == 3, "ушло ровно столько, сколько разрешено (получено %d)" % len(sent))
+order = [m.splitlines()[2] for m in sent]
+print("  --- порядок отправки ---")
+for line in order:
+    print("  | " + line)
+check("Re: your message" in order[0], "первым - живой человек, который ждёт ответа")
+check("телеграм-бот" in order[1], "вторым - телеграм-бот")
+check("парсер" in order[2], "третьим - парсер")
+check(not any("Kubernetes" in m or "Unity" in m for m in sent),
+      "тяжёлая долгая разработка вытеснена, а не наоборот")
+check(lm._notify_state["skipped"] == 2, "отброшенное посчитано")
+
+print("\n38. Нажатия сверх предохранителя не теряются, а ждут следующего прогона")
+state = {"offset": 0, "items": {}, "deferred": []}
+keys = []
+for i in range(lm.MAX_SENDS_PER_RUN + 2):
+    markup = lm.register_send_button(state, "client%d@acme.io" % i, "Тема %d" % i, "текст")
+    keys.append(markup["inline_keyboard"][0][0]["callback_data"].split(":")[1])
+
+pending_updates = [
+    {"update_id": 100 + i, "callback_query": {
+        "id": "cb%d" % i, "data": "send:" + key,
+        "message": {"message_id": 500 + i, "chat": {"id": 1}}}}
+    for i, key in enumerate(keys)
+]
+lm.telegram_api = lambda method, payload, quiet_errors=(): (
+    {"ok": True, "result": pending_updates} if method == "getUpdates" else {"ok": True})
+mails[:] = []
+sent[:] = []
+lm.process_send_buttons(state)
+check(len(mails) == lm.MAX_SENDS_PER_RUN,
+      "за прогон ушло не больше предохранителя (%d)" % len(mails))
+check(len(state["deferred"]) == 2, "два нажатия отложены, а не потеряны")
+check(len(state["items"]) == 2, "их письма остались в очереди")
+
+# следующий прогон: новых нажатий нет, но отложенные должны уйти сами
+lm.telegram_api = lambda method, payload, quiet_errors=(): (
+    {"ok": True, "result": []} if method == "getUpdates" else {"ok": True})
+mails[:] = []
+lm.process_send_buttons(state)
+check(len(mails) == 2, "отложенные письма ушли на следующем прогоне (получено %d)"
+      % len(mails))
+check(state["items"] == {} and state["deferred"] == [], "очередь разгребена до конца")
+
+print("\n39. Ответ клиенту уходит той же перепиской")
+lm._pending_state = {"offset": 0, "items": {}, "deferred": []}
+lm.send_telegram = lambda text, reply_markup=None: sent.append((text, reply_markup))
+sent[:] = []
+reset_limits()
+notify_now("Личное письмо ⚡ ТЕБЕ ОТВЕТИЛИ", "Про сайт для кофейни", "", "",
+           details="От: Сергей <sergey@romashka.ru>\n\nДобрый день, интересно",
+           reply_to="sergey@romashka.ru",
+           reply_subject="Re: Про сайт для кофейни",
+           in_reply_to="<abc123@mail.ru>")
+check(sent and sent[0][1] is not None, "к письму клиента прицеплена кнопка ответа")
+queued = list(lm._pending_state["items"].values())
+check(len(queued) == 1, "ответ лежит в очереди")
+if queued:
+    check(queued[0]["in_reply_to"] == "<abc123@mail.ru>",
+          "ответ подклеится к переписке, а не придёт отдельным письмом")
+    check(queued[0]["subject"] == "Re: Про сайт для кофейни", "тема - ответная")
 
 print("\n" + "=" * 60)
 if failures:
