@@ -2363,9 +2363,12 @@ OSM_ENABLED = True
 OSM_ENDPOINTS = (
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",   # запасной инстанс
-    "https://overpass.osm.ch/api/interpreter",         # и ещё один: оба выше
-                                                       # уже падали разом
 )
+# Третьим тут стоял overpass.osm.ch - и был убран: этот инстанс держит
+# только Швейцарию, поэтому на Новосибирск он честно ответил "найдено 0".
+# Пустой ответ хуже ошибки: перебор инстансов на нём останавливался, и
+# прогон выглядел как "в городе ничего нет". Отсюда же правило ниже:
+# пустой ответ - повод спросить следующий инстанс, а не расходиться.
 OSM_MAX_RESULTS = 60
 
 # Категории, которым сайт-визитка реально нужна и у которых есть бюджет.
@@ -2481,7 +2484,8 @@ def whatsapp_button(phone, cc, text):
 
 
 def overpass_get(query):
-    """Спрашивает Overpass, при неудаче пробует запасной инстанс."""
+    """Спрашивает Overpass, при неудаче или пустом ответе идёт к следующему."""
+    last = None
     for endpoint in OSM_ENDPOINTS:
         try:
             r = requests.post(endpoint, data={"data": query},
@@ -2489,10 +2493,15 @@ def overpass_get(query):
             if r.status_code >= 400:
                 print("[osm] %s -> HTTP %s" % (endpoint, r.status_code))
                 continue
-            return r.json()
+            data = r.json()
         except Exception as e:
             print("[osm] %s -> ошибка (%s): %s" % (endpoint, type(e).__name__, e))
-    return None
+            continue
+        if data.get("elements"):
+            return data
+        print("[osm] %s -> пусто, спрашиваю следующий" % endpoint)
+        last = data
+    return last
 
 
 def check_osm_no_website(seen):

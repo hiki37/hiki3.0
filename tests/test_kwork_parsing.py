@@ -24,6 +24,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sent = []
 real_send_telegram = lm.send_telegram   # настоящая функция, для теста обрезки
 real_build_draft = lm.build_draft
+real_overpass_get = lm.overpass_get   # до подмены в тестах про карты
 lm.send_telegram = lambda text, reply_markup=None: sent.append(text)
 
 failures = []
@@ -713,6 +714,26 @@ reset_limits()
 lm.check_osm_no_website(seen_chain)
 lm.flush_notifications()
 check(not sent, "на втором круге той же компании повторно не пишем")
+
+print("\n35c. Пустой ответ инстанса не считается ответом")
+calls = []
+def fake_post(url, data=None, headers=None, timeout=None):
+    calls.append(url)
+    class R:
+        status_code = 200
+        def json(self_inner):
+            # первый инстанс отвечает пустотой, второй - настоящими данными
+            return ({"elements": []} if len(calls) == 1
+                    else {"elements": [{"type": "node", "id": 1, "tags": {}}]})
+    return R()
+real_post = lm.requests.post
+lm.requests.post = fake_post
+try:
+    data = real_overpass_get("[out:json];")
+finally:
+    lm.requests.post = real_post
+check(len(calls) == 2, "после пустого ответа спрошен следующий инстанс")
+check(data and len(data.get("elements", [])) == 1, "взяты данные того, у кого они есть")
 
 print("\n36. Номера телефонов из карт превращаются в ссылки")
 check(lm.osm_phone_digits("+7 (950) 002-05-99", "7") == "79500020599", "международный номер")
