@@ -14,6 +14,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import time as _time_module
+
 import lead_monitor as lm
 
 lm.pick_osm_city_original = lm.pick_osm_city   # до подмены в тестах
@@ -396,6 +398,22 @@ check('["phone"]' in q and '["contact:phone"]' in q,
       "телефон берём - в мессенджер оффер уходит по нему")
 check('["email"]' in q and '["contact:email"]' in q,
       "почту тоже просим: на неё оффер уходит одной кнопкой")
+
+# ...но за один прогон - только одну пару ключей: со всеми четырьмя
+# бесплатный Overpass отвечает 504 (проверено на боевом прогоне).
+mail_q = lm.build_osm_query((55.55, 37.35, 55.92, 37.85), ("email", "contact:email"))
+check('["email"]' in mail_q and '["phone"]' not in mail_q,
+      "почтовый прогон не тащит заодно телефонные ветки")
+groups = set()
+_real_time = _time_module.time
+try:
+    for quarter in range(4):
+        _time_module.time = (lambda q: (lambda: q * 900.0))(quarter)
+        groups.add(lm.pick_osm_contacts())
+finally:
+    _time_module.time = _real_time
+check(len(groups) == len(lm.OSM_CONTACT_GROUPS),
+      "за час чередуются обе пары ключей (получено %d)" % len(groups))
 check('55.55,37.35,55.92,37.85' in q, "рамка города подставлена")
 
 overpass_answer = {"elements": [

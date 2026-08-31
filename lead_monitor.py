@@ -2361,6 +2361,8 @@ OSM_ENABLED = True
 OSM_ENDPOINTS = (
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",   # запасной инстанс
+    "https://overpass.osm.ch/api/interpreter",         # и ещё один: оба выше
+                                                       # уже падали разом
 )
 OSM_MAX_RESULTS = 60
 
@@ -2371,6 +2373,23 @@ OSM_AMENITIES = ("cafe|restaurant|bar|fast_food|dentist|doctors|clinic|"
 # По каким тегам считаем, что до заведения вообще можно достучаться.
 # Порядок важен: почта идёт первой, потому что оффер на неё уходит кнопкой.
 OSM_CONTACT_KEYS = ("email", "contact:email", "phone", "contact:phone")
+
+# ...но не все сразу. Проверено на боевом прогоне: запрос со всеми четырьмя
+# ключами Overpass не вытягивает - оба инстанса ответили 504 и 502 на том же
+# городе, который минутой раньше отдавался целиком. Поэтому за один прогон
+# спрашиваем только одну пару ключей, а пары чередуются каждые 15 минут -
+# нагрузка на бесплатный сервер осталась ровно такой, какая работала.
+OSM_CONTACT_GROUPS = (("email", "contact:email"), ("phone", "contact:phone"))
+
+
+def pick_osm_contacts():
+    """Чередование пар ключей: почта - телефон - почта - ...
+
+    Считаем по 15-минутным отрезкам, а не по часам: город меняется раз в час,
+    и при часовом счёте одному и тому же городу всегда доставалась бы одна и
+    та же пара ключей.
+    """
+    return OSM_CONTACT_GROUPS[int(time.time() // 900) % len(OSM_CONTACT_GROUPS)]
 
 # Города обходятся по очереди - по одному за прогон, чтобы не долбить
 # бесплатный Overpass. Список правь свободно: bbox это (юг, запад, север,
@@ -2399,7 +2418,7 @@ def pick_osm_city():
     return OSM_CITIES[int(time.time() // 3600) % len(OSM_CITIES)]
 
 
-def build_osm_query(bbox):
+def build_osm_query(bbox, contact_keys=OSM_CONTACT_KEYS):
     """Overpass QL: с именем и хоть каким-то контактом, но БЕЗ сайта.
 
     Контакт требуется на стороне сервера: без него лид бесполезен, обращаться
@@ -2411,7 +2430,7 @@ def build_osm_query(bbox):
     box = "%s,%s,%s,%s" % bbox
     parts = []
     for selector in ('["amenity"~"^(%s)$"]' % OSM_AMENITIES, '["shop"]'):
-        for contact_key in OSM_CONTACT_KEYS:
+        for contact_key in contact_keys:
             parts.append(
                 'nwr["name"][!"website"][!"contact:website"]["%s"]%s(%s);'
                 % (contact_key, selector, box)
@@ -2482,13 +2501,15 @@ def check_osm_no_website(seen):
     if city is None:
         return
 
-    data = overpass_get(build_osm_query(city["bbox"]))
+    contacts = pick_osm_contacts()
+    data = overpass_get(build_osm_query(city["bbox"], contacts))
     if data is None:
         print("[osm] ни один инстанс Overpass не ответил - пропускаю")
         return
 
     elements = data.get("elements", [])
-    print("[osm] %s: заведений без сайта найдено %d" % (city["name"], len(elements)))
+    print("[osm] %s (%s): заведений без сайта найдено %d"
+          % (city["name"], "/".join(contacts), len(elements)))
 
     source = ("Maps — business without a website" if city["lang"] == "en"
               else "Карты — бизнес без сайта")
