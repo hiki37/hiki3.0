@@ -44,8 +44,13 @@ import imaplib
 import json
 import os
 import re
+import smtplib
+import sys
+import uuid
 from datetime import datetime, timedelta
 from email.header import decode_header
+from email.mime.text import MIMEText
+from email.utils import formataddr
 
 import feedparser
 import requests
@@ -517,7 +522,7 @@ def matches_keywords(text, keywords=None):
     return any(kw.lower() in low for kw in words)
 
 
-def send_telegram(text):
+def send_telegram(text, reply_markup=None):
     """Отправка с повторами.
 
     При очереди сообщений подряд Telegram рвёт соединение ("Connection reset
@@ -531,12 +536,14 @@ def send_telegram(text):
     if len(text) > 4000:
         text = text[:4000] + "\n[...обрезано]"
 
+    payload = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
+    if reply_markup is not None:
+        payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     for attempt in range(3):
         try:
-            r = requests.post(
-                url, data={"chat_id": TELEGRAM_CHAT_ID, "text": text}, timeout=15
-            )
+            r = requests.post(url, data=payload, timeout=15)
             if r.status_code == 429:
                 wait = int((r.json().get("parameters") or {}).get("retry_after", 3))
                 print(f"[telegram] лимит, жду {wait}с")
@@ -731,10 +738,20 @@ def extract_contacts(text):
     return ", ".join(found[:3])
 
 
-def notify(source, title, description, link, details=None):
+# Очередь писем под кнопкой. main() кладёт сюда состояние, чтобы notify мог
+# зарегистрировать кнопку, не таская состояние через все источники.
+_pending_state = None
+
+
+def notify(source, title, description, link, details=None,
+           reply_to=None, reply_subject=None, in_reply_to=None):
     """details - уже собранный текст уведомления. Если он задан, description
     не используется: источник сам решил, что и как показывать (у Kwork,
-    например, это цена + рубрика + покупатель отдельными строками)."""
+    например, это цена + рубрика + покупатель отдельными строками).
+
+    reply_to - почта, на которую можно ответить письмом. Если она задана и
+    черновик получился, к сообщению прицепится кнопка "Отправить письмо".
+    """
     body = details if details is not None else (description or "")[:300]
     msg = f"🆕 {source}\n\n{title}"
 
@@ -747,6 +764,7 @@ def notify(source, title, description, link, details=None):
     if link:
         msg += f"\n\n🔗 {link}"
 
+    draft = None
     if wants_draft(source) and (title or body):
         draft = build_draft(source, title, body, link)
         if draft:
@@ -758,6 +776,19 @@ def notify(source, title, description, link, details=None):
                      else "✍️ ЧЕРНОВИК ОТКЛИКА (скопируй, проверь, отправь):")
             msg += "\n\n" + "-" * 20 + "\n" + label + "\n\n" + draft
 
+    # Кнопка появляется, только если есть КУДА писать и ЧТО писать. У карт её
+    # не бывает намеренно: там телефон, а не почта, и обращаться туда надо
+    # голосом, а не письмом.
+    markup = None
+    if (SEND_BUTTON_ENABLED and _pending_state is not None
+            and reply_to and draft and not is_maps_source(source)):
+        markup = register_send_button(
+            _pending_state, reply_to,
+            reply_subject or ("Re: " + (title or "")[:120]),
+            draft, in_reply_to,
+        )
+        msg += "\n\n👉 Кнопка ниже отправит этот текст на %s" % reply_to
+
     if _notify_state["sent"] >= MAX_NOTIFICATIONS_PER_RUN:
         _notify_state["skipped"] += 1
         return False
@@ -767,7 +798,7 @@ def notify(source, title, description, link, details=None):
         _notify_state["skipped"] += 1
         return False
 
-    send_telegram(msg)
+    send_telegram(msg, reply_markup=markup)
     _notify_state["sent"] += 1
     _notify_state["by_source"][source] = _notify_state["by_source"].get(source, 0) + 1
     print(f"[+] {source}: {title}")
@@ -1201,6 +1232,178 @@ def check_kwork_mail(seen):
                 pass
 
 
+# ==================== КНОПКА "ОТПРАВИТЬ" В TELEGRAM ====================
+#
+# Смысл: убрать из цепочки копипаст, но оставить решение человеку. Лид, до
+# которого можно дописаться письмом, приходит с кнопкой. Нажал - на следующем
+# прогоне бот сам отправит письмо с твоего ящика.
+#
+# Почему не отправлять сразу, без кнопки: за один день фильтры дважды
+# пропустили мусор - Hacker News подцепил тред 2020 года, RemoteOK прислал
+# "Kitchen Porter". Обе ошибки поймали и починили, но при автоотправке это
+# ушло бы живым людям с твоего адреса. Кнопка - ровно одна точка, где человек
+# смотрит глазами; всё до и после неё делает бот.
+#
+# Своего сервера не нужно: на каждом прогоне бот спрашивает у Telegram
+# getUpdates и разбирает нажатия, случившиеся с прошлого раза. Задержка до
+# 15 минут - цена того, что всё бесплатно и без хостинга.
+
+SEND_BUTTON_ENABLED = True
+PENDING_FILE = "pending_sends.json"
+PENDING_TTL_DAYS = 7          # ненажатые кнопки протухают
+MAX_SENDS_PER_RUN = 5         # предохранитель: больше пяти писем за раз не уйдёт
+
+SMTP_HOST = os.environ.get("SMTP_HOST", "")   # пусто -> выводим из IMAP_HOST
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "465"))
+MAIL_FROM_NAME = os.environ.get("MAIL_FROM_NAME", "")
+
+
+def load_pending():
+    if os.path.exists(PENDING_FILE):
+        try:
+            with open(PENDING_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                data.setdefault("offset", 0)
+                data.setdefault("items", {})
+                return data
+        except Exception as e:
+            print("[send] не смог прочитать %s (%s) - начинаю с чистого листа"
+                  % (PENDING_FILE, e))
+    return {"offset": 0, "items": {}}
+
+
+def save_pending(state):
+    # Выкидываем протухшее, чтобы файл не рос вечно.
+    deadline = time.time() - PENDING_TTL_DAYS * 24 * 3600
+    state["items"] = {k: v for k, v in state.get("items", {}).items()
+                      if v.get("created", 0) >= deadline}
+    with open(PENDING_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=1)
+
+
+def smtp_host():
+    if SMTP_HOST:
+        return SMTP_HOST
+    # imap.gmail.com -> smtp.gmail.com, imap.yandex.ru -> smtp.yandex.ru
+    return IMAP_HOST.replace("imap.", "smtp.", 1)
+
+
+def send_email(to_addr, subject, body, in_reply_to=None):
+    """Письмо с твоего ящика тем же паролем приложения, которым бот уже
+    читает почту по IMAP. Возвращает True/False."""
+    if not IMAP_USER or not IMAP_PASSWORD:
+        print("[send] нет доступа к почте - отправить не могу")
+        return False
+
+    message = MIMEText(body, "plain", "utf-8")
+    message["From"] = (formataddr((MAIL_FROM_NAME, IMAP_USER))
+                       if MAIL_FROM_NAME else IMAP_USER)
+    message["To"] = to_addr
+    message["Subject"] = subject
+    if in_reply_to:
+        # Чтобы ответ подклеился к переписке, а не пришёл отдельным письмом.
+        message["In-Reply-To"] = in_reply_to
+        message["References"] = in_reply_to
+
+    try:
+        with smtplib.SMTP_SSL(smtp_host(), SMTP_PORT, timeout=30) as smtp:
+            smtp.login(IMAP_USER, IMAP_PASSWORD)
+            smtp.sendmail(IMAP_USER, [to_addr], message.as_string())
+        print("[send] письмо отправлено: %s" % to_addr)
+        return True
+    except Exception as e:
+        print("[send] не отправилось на %s (%s): %s"
+              % (to_addr, type(e).__name__, e))
+        return False
+
+
+def telegram_api(method, payload):
+    url = "https://api.telegram.org/bot%s/%s" % (TELEGRAM_BOT_TOKEN, method)
+    try:
+        r = requests.post(url, json=payload, timeout=20)
+        if r.status_code >= 400:
+            print("[telegram] %s -> HTTP %s: %s"
+                  % (method, r.status_code, r.text[:200]))
+            return None
+        return r.json()
+    except Exception as e:
+        print("[telegram] %s -> ошибка (%s): %s" % (method, type(e).__name__, e))
+        return None
+
+
+def register_send_button(state, to_addr, subject, body, in_reply_to=None):
+    """Кладёт письмо в очередь и отдаёт разметку кнопки для сообщения."""
+    key = uuid.uuid4().hex[:12]
+    state.setdefault("items", {})[key] = {
+        "to": to_addr, "subject": subject, "body": body,
+        "in_reply_to": in_reply_to, "created": time.time(),
+    }
+    return {"inline_keyboard": [[
+        {"text": "📤 Отправить письмо", "callback_data": "send:" + key},
+    ]]}
+
+
+def process_send_buttons(state):
+    """Разбирает нажатия кнопок, случившиеся с прошлого прогона."""
+    if not SEND_BUTTON_ENABLED:
+        return
+
+    data = telegram_api("getUpdates", {
+        "offset": state.get("offset", 0),
+        "timeout": 0,
+        "allowed_updates": ["callback_query"],
+    })
+    if not data or not data.get("ok"):
+        return
+
+    sent = 0
+    for update in data.get("result", []):
+        state["offset"] = max(state.get("offset", 0),
+                              update.get("update_id", 0) + 1)
+
+        callback = update.get("callback_query")
+        if not callback:
+            continue
+        payload = callback.get("data") or ""
+        if not payload.startswith("send:"):
+            continue
+
+        key = payload[len("send:"):]
+        item = state.get("items", {}).pop(key, None)
+        if item is None:
+            telegram_api("answerCallbackQuery", {
+                "callback_query_id": callback.get("id"),
+                "text": "Это письмо уже отправлено или устарело",
+            })
+            continue
+
+        if sent >= MAX_SENDS_PER_RUN:
+            # Возвращаем в очередь: отправим на следующем прогоне.
+            state["items"][key] = item
+            telegram_api("answerCallbackQuery", {
+                "callback_query_id": callback.get("id"),
+                "text": "Отправлю на следующем прогоне",
+            })
+            continue
+
+        ok = send_email(item["to"], item["subject"], item["body"],
+                        item.get("in_reply_to"))
+        if ok:
+            sent += 1
+
+        telegram_api("answerCallbackQuery", {
+            "callback_query_id": callback.get("id"),
+            "text": "Отправлено" if ok else "Не отправилось, смотри лог",
+        })
+        head = "✅ Письмо отправлено" if ok else "❌ Не удалось отправить"
+        send_telegram("%s\n\nКому: %s\nТема: %s\n\n%s"
+                      % (head, item["to"], item["subject"], item["body"]))
+
+    if sent:
+        print("[send] отправлено писем за прогон: %d" % sent)
+
+
 # ---------------------- ЛИЧНЫЕ ПИСЬМА: ТЕБЕ ОТВЕТИЛИ ----------------------
 #
 # Дыра, которая ломала всю автоматизацию. Бот читал в ящике ТОЛЬКО письма от
@@ -1246,6 +1449,21 @@ def looks_like_robot_mail(sender, headers_text):
         return True
     if any(domain in low_sender for domain in _SERVICE_DOMAINS):
         return True
+
+    # Рассылки почти всегда уходят с отдельного поддомена: info.sportmaster.ru,
+    # emails.tinkoff.ru, email.claude.com - ровно эти три и лежали в ящике за
+    # сутки. Живой человек пишет с обычного домена (gmail.com, mail.ru, свой
+    # рабочий), а не с "email.чего-то".
+    match = re.search(r"@([a-z0-9.\-]+)", low_sender)
+    if match:
+        domain = match.group(1)
+        if domain.count(".") >= 2:
+            prefix = domain.split(".")[0]
+            if prefix in ("email", "emails", "mail", "mailing", "mailings",
+                          "info", "news", "newsletter", "notify",
+                          "notifications", "send", "sender", "smtp",
+                          "marketing", "mktg"):
+                return True
     return False
 
 
@@ -1737,8 +1955,15 @@ def check_hn_freelance(seen):
             details = text[:600]
             if author:
                 details = "author: " + author + "\n" + details
+            # Заказчик почти всегда оставляет почту прямо в комментарии - на
+            # неё и вешаем кнопку. Берём первую: их редко бывает больше одной,
+            # а гадать, на какую из двух писать, хуже, чем не предлагать кнопку.
+            emails = [c for c in extract_contacts(text).split(", ")
+                      if "@" in c and not c.startswith("@")]
             notify("Hacker News — Seeking freelancer", title, "", link,
-                   details=details)
+                   details=details,
+                   reply_to=emails[0] if emails else None,
+                   reply_subject="Freelance developer — re: your HN post")
 
 
 # ---------------------- ИСТОЧНИК 9: WE WORK REMOTELY (США) ----------------------
@@ -1984,10 +2209,50 @@ def check_osm_no_website(seen):
 
 # ---------------------- ОДИН ЗАПУСК ----------------------
 
+def send_test_button(state):
+    """Проверка кнопки без риска для посторонних: письмо уйдёт ТЕБЕ ЖЕ.
+
+    Нажми кнопку под сообщением - и на следующем прогоне (до 15 минут) бот
+    отправит письмо на твой собственный адрес. Если оно пришло, значит
+    работает вся цепочка: кнопка, очередь, SMTP.
+    """
+    body = ("Это проверка кнопки в боте лидов.\n\n"
+            "Если ты читаешь это письмо - значит нажатие кнопки в Telegram "
+            "дошло до бота, очередь отработала и отправка письма с твоего "
+            "ящика настроена верно. Дальше та же кнопка будет появляться под "
+            "лидами с Hacker News, где заказчик оставил почту.")
+    markup = register_send_button(
+        state, IMAP_USER, "Проверка кнопки: бот лидов", body,
+    )
+    send_telegram(
+        "🧪 ПРОВЕРКА КНОПКИ\n\n"
+        "Нажми кнопку ниже. На следующем прогоне (до 15 минут) бот отправит "
+        "письмо на твой же адрес %s - никто посторонний его не получит.\n\n"
+        "Придёт письмо - значит вся цепочка работает." % IMAP_USER,
+        reply_markup=markup,
+    )
+    print("[test] тестовое сообщение с кнопкой отправлено")
+
+
 def main():
+    global _pending_state
+
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("[ошибка] Не заданы TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID "
               "(переменные окружения / GitHub Secrets). Проверка отменена.")
+        return
+
+    # Сначала разбираем нажатия кнопок с прошлого прогона: человек уже принял
+    # решение, письмо не должно ждать, пока бот обойдёт все источники.
+    _pending_state = load_pending()
+    try:
+        process_send_buttons(_pending_state)
+    except Exception as e:
+        print("[send] ошибка разбора нажатий (%s): %s" % (type(e).__name__, e))
+
+    if "--test-button" in sys.argv:
+        send_test_button(_pending_state)
+        save_pending(_pending_state)
         return
 
     print("Проверка лидов...")
@@ -2069,6 +2334,7 @@ def main():
             print(f"[main] ошибка в {check_fn.__name__}: {e}")
 
     save_seen(seen)
+    save_pending(_pending_state)
     if _draft_state["made"]:
         print(f"[draft] черновиков через Claude API: {_draft_state['made']}")
     if _notify_state["skipped"]:

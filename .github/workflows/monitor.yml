@@ -6,6 +6,11 @@ name: Lead Monitor
 # кнопкой Run workflow. Встроенный schedule оставлен только как страховка.
 on:
   workflow_dispatch:
+    inputs:
+      test_button:
+        description: 'Проверка кнопки: прислать тестовое письмо самому себе'
+        type: boolean
+        default: false
   # Подстраховка на случай, если cron-job.org отвалится (у него кончится
   # бесплатный лимит, поменяется токен, упадёт сам сервис). Раз в час - это
   # редко, поэтому даже ненадёжный встроенный schedule лишним не будет:
@@ -54,13 +59,18 @@ jobs:
           IMAP_PASSWORD: ${{ secrets.IMAP_PASSWORD }}
           SUPERJOB_API_KEY: ${{ secrets.SUPERJOB_API_KEY }}
           HH_CONTACT: ${{ secrets.HH_CONTACT }}
-        run: python lead_monitor.py
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          MAIL_FROM_NAME: ${{ secrets.MAIL_FROM_NAME }}
+        run: python lead_monitor.py ${{ inputs.test_button == true && '--test-button' || '' }}
 
       - name: Save seen-leads state back to the repo
         run: |
           git config user.name "lead-monitor-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add seen_leads.json
+          # pending_sends.json - очередь писем под кнопкой и позиция чтения
+          # getUpdates. Без него бот после каждого прогона забывал бы, какие
+          # нажатия уже разобрал, и слал письмо повторно.
+          git add seen_leads.json pending_sends.json
           git diff --staged --quiet || git commit -m "chore: update seen leads"
           # Пока прогон шёл, main мог уехать вперёд: cron-job.org и запасной
           # schedule иногда стартуют почти одновременно, и тогда обычный push

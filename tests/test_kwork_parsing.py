@@ -22,7 +22,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sent = []
 real_send_telegram = lm.send_telegram   # настоящая функция, для теста обрезки
 real_build_draft = lm.build_draft
-lm.send_telegram = lambda text: sent.append(text)
+lm.send_telegram = lambda text, reply_markup=None: sent.append(text)
 
 failures = []
 
@@ -503,6 +503,63 @@ if sent:
         print("  | " + line)
     check("ТЕБЕ ОТВЕТИЛИ" in sent[0], "видно, что это ответ, а не очередной лид")
     check("sarah@acmelabs.io" in sent[0], "отправитель на месте")
+
+print("\n31. Рассылки с поддоменов отправки отсеиваются")
+# ровно эти три лежали в ящике за ночь
+for who in ("info@info.sportmaster.ru", "offers@emails.tinkoff.ru",
+            "no-reply@email.claude.com", "promo@mail.example-shop.ru"):
+    check(lm.looks_like_robot_mail(who, ""), "рассылка отсеяна: %s" % who)
+for who in ("sarah@acmelabs.io", "ivan@mail.ru", "boss@my-company.co.uk"):
+    check(not lm.looks_like_robot_mail(who, ""), "человек пропущен: %s" % who)
+
+print("\n32. Кнопка отправки: очередь и нажатие")
+state = {"offset": 0, "items": {}}
+markup = lm.register_send_button(state, "client@acme.io", "Re: your post", "Hi! ...")
+key = markup["inline_keyboard"][0][0]["callback_data"].split(":")[1]
+check(len(state["items"]) == 1, "письмо положено в очередь")
+check(state["items"][key]["to"] == "client@acme.io", "адресат сохранён")
+check(markup["inline_keyboard"][0][0]["text"].endswith("Отправить письмо"),
+      "кнопка подписана понятно")
+
+lm.telegram_api = lambda method, payload: (
+    {"ok": True, "result": [{"update_id": 7, "callback_query": {
+        "id": "cb1", "data": "send:" + key}}]} if method == "getUpdates"
+    else {"ok": True})
+mails = []
+lm.send_email = lambda to, subject, body, in_reply_to=None: (
+    mails.append((to, subject, body)) or True)
+sent[:] = []
+lm.process_send_buttons(state)
+check(len(mails) == 1, "нажатие привело к отправке письма (получено %d)" % len(mails))
+if mails:
+    check(mails[0][0] == "client@acme.io", "письмо ушло тому, кому надо")
+check(state["items"] == {}, "письмо убрано из очереди - повторно не уйдёт")
+check(state["offset"] == 8, "позиция чтения сдвинута, нажатие не разберётся дважды")
+check(any("Письмо отправлено" in m for m in sent), "в Telegram пришло подтверждение")
+
+print("\n33. Повторное нажатие той же кнопки ничего не отправляет")
+mails[:] = []
+lm.process_send_buttons(state)
+check(len(mails) == 0, "второй раз письмо не уходит")
+
+print("\n34. Кнопка не вешается там, где писать некуда или незачем")
+lm._pending_state = {"offset": 0, "items": {}}
+lm.send_telegram = lambda text, reply_markup=None: sent.append((text, reply_markup))
+sent[:] = []
+lm._notify_state["sent"] = 0
+lm._notify_state["by_source"] = {}
+lm.notify("Hacker News — Seeking freelancer", "SEEKING FREELANCER | need a scraper",
+          "", "", details="write me", reply_to="client@acme.io")
+check(sent and sent[0][1] is not None, "у лида с почтой кнопка есть")
+
+sent[:] = []
+lm.notify("Карты — бизнес без сайта", "Кофейня — Москва", "", "",
+          details="телефон +7 495 000", reply_to="cafe@example.com")
+check(sent and sent[0][1] is None, "у карт кнопки нет: там телефон, а не почта")
+
+sent[:] = []
+lm.notify("FL.ru", "Заказ без контакта", "", "", details="контакта нет")
+check(sent and sent[0][1] is None, "без адреса кнопки нет")
 
 print("\n" + "=" * 60)
 if failures:
