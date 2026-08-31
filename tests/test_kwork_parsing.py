@@ -512,6 +512,16 @@ for who in ("info@info.sportmaster.ru", "offers@emails.tinkoff.ru",
 for who in ("sarah@acmelabs.io", "ivan@mail.ru", "boss@my-company.co.uk"):
     check(not lm.looks_like_robot_mail(who, ""), "человек пропущен: %s" % who)
 
+print("\n31b. Собственное письмо не считается ответом клиента")
+lm.IMAP_USER = "me@example.com"
+check(lm.looks_like_robot_mail("me@example.com", ""),
+      "письмо от самого себя отсеяно")
+check(lm.looks_like_robot_mail("Я <ME@example.com>", ""),
+      "регистр не мешает")
+check(not lm.looks_like_robot_mail("client@example.com", ""),
+      "чужое письмо с того же домена проходит")
+lm.IMAP_USER = ""
+
 print("\n32. Кнопка отправки: очередь и нажатие")
 state = {"offset": 0, "items": {}}
 markup = lm.register_send_button(state, "client@acme.io", "Re: your post", "Hi! ...")
@@ -521,10 +531,13 @@ check(state["items"][key]["to"] == "client@acme.io", "адресат сохра�
 check(markup["inline_keyboard"][0][0]["text"].endswith("Отправить письмо"),
       "кнопка подписана понятно")
 
-lm.telegram_api = lambda method, payload: (
-    {"ok": True, "result": [{"update_id": 7, "callback_query": {
-        "id": "cb1", "data": "send:" + key}}]} if method == "getUpdates"
-    else {"ok": True})
+tg_calls = []
+lm.telegram_api = lambda method, payload, quiet_errors=(): (
+    tg_calls.append(method) or (
+        {"ok": True, "result": [{"update_id": 7, "callback_query": {
+            "id": "cb1", "data": "send:" + key,
+            "message": {"message_id": 55, "chat": {"id": 1}}}}]}
+        if method == "getUpdates" else {"ok": True}))
 mails = []
 lm.send_email = lambda to, subject, body, in_reply_to=None: (
     mails.append((to, subject, body)) or True)
@@ -536,6 +549,8 @@ if mails:
 check(state["items"] == {}, "письмо убрано из очереди - повторно не уйдёт")
 check(state["offset"] == 8, "позиция чтения сдвинута, нажатие не разберётся дважды")
 check(any("Письмо отправлено" in m for m in sent), "в Telegram пришло подтверждение")
+check("editMessageReplyMarkup" in tg_calls,
+      "кнопка с обработанного сообщения снята")
 
 print("\n33. Повторное нажатие той же кнопки ничего не отправляет")
 mails[:] = []

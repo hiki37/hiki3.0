@@ -1318,13 +1318,21 @@ def send_email(to_addr, subject, body, in_reply_to=None):
         return False
 
 
-def telegram_api(method, payload):
+def telegram_api(method, payload, quiet_errors=()):
+    """quiet_errors - куски текста ошибки, которые не надо считать поломкой.
+
+    Нужно для answerCallbackQuery: всплывающее подтверждение над кнопкой живёт
+    у Telegram около минуты, а нажатия мы разбираем раз в 15 минут, поэтому
+    "query is too old" тут норма, а не сбой. Настоящее подтверждение приходит
+    отдельным сообщением.
+    """
     url = "https://api.telegram.org/bot%s/%s" % (TELEGRAM_BOT_TOKEN, method)
     try:
         r = requests.post(url, json=payload, timeout=20)
         if r.status_code >= 400:
-            print("[telegram] %s -> HTTP %s: %s"
-                  % (method, r.status_code, r.text[:200]))
+            text = r.text[:200]
+            if not any(marker in text for marker in quiet_errors):
+                print("[telegram] %s -> HTTP %s: %s" % (method, r.status_code, text))
             return None
         return r.json()
     except Exception as e:
@@ -1342,6 +1350,26 @@ def register_send_button(state, to_addr, subject, body, in_reply_to=None):
     return {"inline_keyboard": [[
         {"text": "📤 Отправить письмо", "callback_data": "send:" + key},
     ]]}
+
+
+def strip_button(callback):
+    """Убирает кнопку с уже обработанного сообщения.
+
+    Иначе она висит вечно и выглядит как нерешённое дело: всплывашка над
+    кнопкой к моменту разбора протухает, так что снятая кнопка - единственный
+    видимый признак, что нажатие приняли. Повторное нажатие вреда не нанесёт
+    (письмо уже убрано из очереди), но и путать не должно.
+    """
+    message = callback.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    message_id = message.get("message_id")
+    if not chat_id or not message_id:
+        return
+    telegram_api("editMessageReplyMarkup", {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "reply_markup": {"inline_keyboard": []},
+    }, quiet_errors=("message is not modified",))
 
 
 def process_send_buttons(state):
@@ -1395,7 +1423,8 @@ def process_send_buttons(state):
             telegram_api("answerCallbackQuery", {
                 "callback_query_id": callback.get("id"),
                 "text": "Это письмо уже отправлено или устарело",
-            })
+            }, quiet_errors=("query is too old", "query ID is invalid"))
+            strip_button(callback)
             continue
 
         if sent >= MAX_SENDS_PER_RUN:
@@ -1415,7 +1444,8 @@ def process_send_buttons(state):
         telegram_api("answerCallbackQuery", {
             "callback_query_id": callback.get("id"),
             "text": "Отправлено" if ok else "Не отправилось, смотри лог",
-        })
+        }, quiet_errors=("query is too old", "query ID is invalid"))
+        strip_button(callback)
         head = "✅ Письмо отправлено" if ok else "❌ Не удалось отправить"
         send_telegram("%s\n\nКому: %s\nТема: %s\n\n%s"
                       % (head, item["to"], item["subject"], item["body"]))
@@ -1465,6 +1495,13 @@ def looks_like_robot_mail(sender, headers_text):
             return True
 
     low_sender = (sender or "").lower()
+
+    # Письмо от самого себя - не ответ клиента. Проверка кнопки отправляет
+    # письмо на твой же адрес, и бот честно отрапортовал "⚡ ТЕБЕ ОТВЕТИЛИ" на
+    # собственное письмо. То же случилось бы с любой копией в свой ящик.
+    if IMAP_USER and IMAP_USER.lower() in low_sender:
+        return True
+
     if any(marker in low_sender for marker in _ROBOT_SENDER_MARKERS):
         return True
     if any(domain in low_sender for domain in _SERVICE_DOMAINS):
