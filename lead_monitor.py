@@ -1349,16 +1349,36 @@ def process_send_buttons(state):
     if not SEND_BUTTON_ENABLED:
         return
 
+    waiting = len(state.get("items", {}))
+
     data = telegram_api("getUpdates", {
         "offset": state.get("offset", 0),
         "timeout": 0,
         "allowed_updates": ["callback_query"],
     })
     if not data or not data.get("ok"):
+        print("[send] getUpdates не ответил - нажатия за этот прогон не разобраны")
         return
 
+    updates = data.get("result", [])
+    print("[send] в очереди писем: %d, нажатий получено: %d (offset %s)"
+          % (waiting, len(updates), state.get("offset", 0)))
+
+    if waiting and not updates:
+        # Тишина при непустой очереди подозрительна: либо кнопку правда не
+        # нажимали, либо боту мешает вебхук - тогда Telegram отдаёт нажатия
+        # ему, а не нам, и getUpdates возвращает пустоту или 409.
+        hook = telegram_api("getWebhookInfo", {})
+        hook_url = ((hook or {}).get("result") or {}).get("url") or ""
+        if hook_url:
+            print("[send] ВНИМАНИЕ: у бота настроен вебхук %s - пока он стоит, "
+                  "нажатия уходят туда, а getUpdates их не видит. Снять: "
+                  "deleteWebhook" % hook_url)
+        else:
+            print("[send] вебхука нет, значит кнопку просто ещё не нажимали")
+
     sent = 0
-    for update in data.get("result", []):
+    for update in updates:
         state["offset"] = max(state.get("offset", 0),
                               update.get("update_id", 0) + 1)
 
