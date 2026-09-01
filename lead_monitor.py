@@ -76,6 +76,13 @@ KEYWORDS = [
     "разработ", "программист", "верстальщик", "программ",
     # телеграм-боты и мини-приложения
     "telegram bot", "телеграм бот", "тг бот", "чат-бот", "chatbot", "бот для телеграм",
+    # Через дефис пишут ничуть не реже, чем через пробел, а для фильтра это
+    # разные строки: "нужен телеграм-бот" мимо списка выше проезжал молча.
+    "телеграм-бот", "телеграмм-бот", "тг-бот", "телега-бот", "бот в телеграм",
+    "aiogram", "telebot", "pyrogram",
+    # "бота"/"ботов" сюда добавлять НЕЛЬЗЯ: сравнение идёт по вхождению
+    # подстроки, а "бота" сидит внутри слова "работа" - и тогда через фильтр
+    # проедет вообще любая вакансия.
     "mini app", "миниапп", "мини-апп", "tma", "web app", "веб-апп", "телеграм-приложение",
     # ИИ, боты, агенты, automation - категории, которые сам отметил в Kwork
     "ии-бот", "ai-бот", "ии агент", "ai agent", "ии-агент", "ai-агент",
@@ -752,12 +759,12 @@ def generate_draft(source, title, details, link):
 # источника), без потолка бот высыпет сотню сообщений подряд и Telegram его
 # просто затротлит. Всё, что сверх потолка, всё равно попадает в seen - то
 # есть повторно не придёт, а в логе будет видно, сколько было отброшено.
-MAX_NOTIFICATIONS_PER_RUN = 30
+MAX_NOTIFICATIONS_PER_RUN = 12
 
 # И потолок на ОДИН источник. Без него источник с самой длинной лентой
 # (RemoteOK отдаёт сотни вакансий за раз) выбирает общий лимит целиком, и
 # лиды с Kwork и Hacker News, которые идут следом, до тебя не доходят.
-MAX_NOTIFICATIONS_PER_SOURCE = 5
+MAX_NOTIFICATIONS_PER_SOURCE = 4
 
 # У карт потолок свой и заведомо больше: там лид - это не заказ, за который
 # соревнуются, а холодный контакт, и работает он объёмом. Плюс отправка идёт
@@ -1035,6 +1042,51 @@ def check_flru(seen):
 
             if matches_keywords(f"{title} {description}"):
                 notify("FL.ru", title, description, link)
+
+
+# ---------------------- РУССКИЕ БИРЖИ: ОТКРЫТЫЕ RSS ----------------------
+#
+# Кроме FL.ru RSS отдают ещё несколько бирж. Ленты живут своей жизнью: одна
+# может переехать, другую закрыть (так уже случилось с Weblancer - там RSS
+# просто убрали). Поэтому источник устроен списком: каждая лента проверяется
+# отдельно, а упавшая пишет строку в лог и никому не мешает. По логу первого
+# же прогона видно, какие ленты живы, - мёртвые из списка убираются.
+
+RU_FEEDS_ENABLED = True
+RU_FEEDS = [
+    ("Freelance.ru", "https://freelance.ru/rss/projects"),
+    ("Habr Freelance", "https://freelance.habr.com/tasks/rss"),
+    ("FreelanceJob.ru", "https://www.freelancejob.ru/rss/projects.xml"),
+    ("Kadrof", "https://www.kadrof.ru/rss/work.xml"),
+]
+
+
+def check_ru_feeds(seen):
+    if not RU_FEEDS_ENABLED:
+        return
+    for name, url in RU_FEEDS:
+        try:
+            feed = fetch_feed(url)
+        except Exception as e:
+            print("[%s] лента недоступна (%s): %s" % (name, type(e).__name__, e))
+            continue
+
+        if not feed.entries:
+            print("[%s] лента пуста или это не RSS - кандидат на удаление" % name)
+            continue
+
+        for entry in feed.entries:
+            uid = "rufeed:%s:%s" % (name, entry.get("id") or entry.get("link", ""))
+            if uid.endswith(":") or uid in seen:
+                continue
+            seen.add(uid)
+
+            title = strip_html(entry.get("title", "Без названия"))
+            description = strip_html(entry.get("summary", ""))
+            link = entry.get("link", "")
+
+            if matches_keywords("%s %s" % (title, description)):
+                notify(name, title, "", link, details=description[:400])
 
 
 # ---------------------- WEBLANCER ----------------------
@@ -1992,11 +2044,22 @@ def check_superjob(seen):
 
 TELEGRAM_CHANNELS_ENABLED = True
 TME_BASE = "https://t.me/s"
+# Формат: только имя канала, без "@" и без "t.me/". Мёртвый или закрытый
+# канал вреда не наносит: бот напишет в лог "постов не найдено" и пойдёт
+# дальше. Ниже - список кандидатов; после первого боевого прогона видно по
+# логу, какие реально отдают посты, и лишние можно вычеркнуть.
+# "distantsiya" был убран раньше: страница отдаётся, а постов в ней нет.
 TELEGRAM_CHANNELS = [
     "frilanser_vacansii",
-    # "distantsiya" убран: по логам страница отдаётся, но постов в ней нет -
-    # канал закрыт, переименован или стал приватным. Добавляй сюда свои,
-    # формат тот же: только имя канала, без "@" и без "t.me/".
+    "freelancetaverna",
+    "distantsiya_rabota",
+    "freelance_rus",
+    "job_it_freelance",
+    "workzavtra",
+    "it_freelancer_jobs",
+    "zakazy_freelance",
+    "freelancerrus",
+    "remote_ru_jobs",
 ]
 
 # Максимум постов из одного канала за прогон - страница t.me/s отдаёт около
@@ -2381,7 +2444,12 @@ def check_remoteok(seen):
 # Данные - OpenStreetMap через Overpass API: открытые, без ключа, без
 # регистрации и без привязки карты.
 
-OSM_ENABLED = True
+# ВЫКЛЮЧЕНО ПО ПРОСЬБЕ: за сутки карты дали ~600 сообщений в чат. Источник
+# работает и настроен (проверка контактов, дедупликация по компании, кнопки
+# оффера) - вернуть его можно одной строкой: OSM_ENABLED = True. Но холодные
+# контакты идут объёмом, а объём и оказался проблемой: в потоке терялось то,
+# ради чего всё делалось - заказы, где человек САМ ищет исполнителя.
+OSM_ENABLED = False
 OSM_ENDPOINTS = (
     "https://overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",   # запасной инстанс
@@ -2923,11 +2991,11 @@ def main():
         return
 
     for check_fn in (check_personal_mail, check_kwork_mail, check_flru,
+                      check_ru_feeds, check_telegram_channels,
                       check_hn_freelance,
                       check_wwr, check_remoteok, check_osm_no_website,
                       check_hh_crowd, check_weblancer, check_hh_broad,
-                      check_hh_project, check_superjob,
-                      check_telegram_channels):
+                      check_hh_project, check_superjob):
         print(f"-> {check_fn.__name__}")
         try:
             check_fn(seen)

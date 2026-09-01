@@ -34,6 +34,12 @@ real_domain_has_website = lm.domain_has_website
 # другая проверка, подменяют эти функции сами.
 lm.domain_has_mx = lambda domain: True
 lm.domain_has_website = lambda domain: False
+
+# Карты в бою выключены (слишком много холодных контактов в чате), но код
+# источника остаётся рабочим и проверяется - иначе включить его обратно
+# одной строкой было бы страшно.
+OSM_ENABLED_BY_DEFAULT = lm.OSM_ENABLED
+lm.OSM_ENABLED = True
 lm.send_telegram = lambda text, reply_markup=None: sent.append(text)
 
 failures = []
@@ -181,6 +187,7 @@ check(not lm.wants_draft("SuperJob"), "SuperJob - черновика нет")
 
 print("\n9. Черновик попадает в сообщение")
 lm.build_draft = lambda source, title, details, link: "Готов сделать бота. Когда нужен результат?"
+reset_limits()   # блоки выше уже выбрали потолок по источнику Kwork
 sent[:] = []
 notify_now("Kwork", "Нужен простой тг-бот для отзывов", "", "https://kwork.ru/new_offer?project=1", details="💰 2 000 Р")
 check(len(sent) == 1, "уведомление отправлено")
@@ -932,6 +939,58 @@ print("\n44. Обрубок номера не превращается в кно
 check(lm.osm_phone_digits("+7 495 999", "7") == "", "короткий номер отброшен")
 check(lm.osm_phone_digits("+7 495 111-22-33-44", "7") == "", "слишком длинный тоже")
 check(lm.osm_phone_digits("+7 495 111-22-33", "7") == "74951112233", "нормальный проходит")
+
+print("\n44b. Русский фильтр не ловится внутри других слов")
+ru_traps = ["Работа с документами в офисе", "Требуется работник склада",
+            "Подработка курьером"]
+for trap in ru_traps:
+    check(not lm.matches_keywords(trap), "не поймано на 'бота' внутри слова: %s" % trap)
+ru_good = ["Нужен телеграм-бот для записи", "Сделать тг-бота под заказы",
+           "Бот на aiogram для приёма заявок", "Нужен лендинг под ключ",
+           "Требуется парсер маркетплейса", "Мини-апп в телеграм"]
+for good in ru_good:
+    check(lm.matches_keywords(good), "поймано как надо: %s" % good)
+
+print("\n45. Настройки потока: карты выключены, потолки под фриланс")
+check(OSM_ENABLED_BY_DEFAULT is False,
+      "источник карт выключен по умолчанию - в чат идут только заказы")
+check(lm.MAX_NOTIFICATIONS_PER_RUN <= 12,
+      "потолок за прогон не больше 12 (сейчас %d)" % lm.MAX_NOTIFICATIONS_PER_RUN)
+check(len(lm.TELEGRAM_CHANNELS) >= 5,
+      "телеграм-каналов в списке %d" % len(lm.TELEGRAM_CHANNELS))
+check(lm.RU_FEEDS_ENABLED and len(lm.RU_FEEDS) >= 3,
+      "русские биржи по RSS подключены (%d лент)" % len(lm.RU_FEEDS))
+
+print("\n46. Лента биржи: мимо фильтра не проходит лишнее")
+sent[:] = []
+reset_limits()
+lm.send_telegram = lambda text, reply_markup=None: sent.append(text)
+
+class FakeEntry(dict):
+    def get(self, key, default=None):
+        return dict.get(self, key, default)
+
+class FakeFeed:
+    entries = [
+        FakeEntry(id="1", link="https://freelance.ru/projects/1",
+                  title="Нужен телеграм-бот для записи клиентов",
+                  summary="Бот на aiogram, приём заявок"),
+        FakeEntry(id="2", link="https://freelance.ru/projects/2",
+                  title="Требуется бухгалтер на полставки",
+                  summary="Ведение первичной документации"),
+    ]
+
+real_fetch_feed = lm.fetch_feed
+lm.fetch_feed = lambda url, timeout=15: FakeFeed()
+lm.RU_FEEDS = [("Freelance.ru", "https://freelance.ru/rss/projects")]
+try:
+    lm.check_ru_feeds(set())
+    lm.flush_notifications()
+finally:
+    lm.fetch_feed = real_fetch_feed
+check(len(sent) == 1, "прошла только задача по профилю (получено %d)" % len(sent))
+check(sent and "телеграм-бот" in sent[0], "это заказ на бота")
+check(not any("бухгалтер" in m for m in sent), "бухгалтерия отсеяна")
 
 print("\n" + "=" * 60)
 if failures:
