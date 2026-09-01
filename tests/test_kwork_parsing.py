@@ -59,8 +59,8 @@ def notify_now(*args, **kwargs):
 
 
 def reset_limits():
-    lm._notify_state.update({"sent": 0, "skipped": 0, "by_source": {},
-                             "queue": [], "seq": 0})
+    lm._notify_state.update({"sent": 0, "skipped": 0, "off_profile": 0,
+                             "by_source": {}, "queue": [], "seq": 0})
 
 
 def check(condition, message):
@@ -336,7 +336,7 @@ print("\n19. Один источник не съедает весь лимит �
 reset_limits()
 sent[:] = []
 for i in range(30):
-    lm.notify("RemoteOK", "Job %d" % i, "", "")
+    lm.notify("RemoteOK", "Telegram bot developer %d" % i, "", "")
 for i in range(3):
     lm.notify("Hacker News — Seeking freelancer", "Client %d" % i, "", "")
 lm.flush_notifications()
@@ -525,7 +525,8 @@ check(objects_seen() == 20, "все 20 просмотрены за два кру
 print("\n28. У остальных источников потолок прежний")
 reset_limits()
 sent[:] = []
-check(notify_now("Kwork", "Тест", "", "") is True, "лид принят в очередь")
+check(notify_now("Kwork", "Тест", "", "") is True,
+      "лид с биржи заказов принят и отправлен (у них проходной балл)")
 check(len(sent) == 1, "и ушёл в Telegram")
 
 lm._notify_state["by_source"]["Kwork"] = lm.MAX_NOTIFICATIONS_PER_SOURCE
@@ -784,7 +785,8 @@ check("телеграм-бот" in order[1], "вторым - телеграм-б
 check("парсер" in order[2], "третьим - парсер")
 check(not any("Kubernetes" in m or "Unity" in m for m in sent),
       "тяжёлая долгая разработка вытеснена, а не наоборот")
-check(lm._notify_state["skipped"] == 2, "отброшенное посчитано")
+check(lm._notify_state["off_profile"] == 2,
+      "тяжёлое отсеяно как не по профилю, а не просто отложено потолком")
 
 print("\n38. Нажатия сверх предохранителя не теряются, а ждут следующего прогона")
 state = {"offset": 0, "items": {}, "deferred": []}
@@ -1010,6 +1012,40 @@ finally:
 check(len(sent) == 1, "прошла только задача по профилю (получено %d)" % len(sent))
 check(sent and "телеграм-бот" in sent[0], "это заказ на бота")
 check(not any("бухгалтер" in m for m in sent), "бухгалтерия отсеяна")
+
+print("\n47. Порог профиля: доски вакансий не шумят, биржи заказов проходят")
+sent[:] = []
+reset_limits()
+lm.send_telegram = lambda text, reply_markup=None: sent.append(text)
+noise = [
+    ("RemoteOK", "Senior Kubernetes microservices engineer"),
+    ("RemoteOK", "Unity game developer, full-time"),
+    ("WeWorkRemotely", "Backend Engineer Ruby on Rails"),
+    ("SuperJob", "Менеджер по продажам"),
+    ("hh.ru — проектная работа", "Инженер-конструктор"),
+]
+for source, title in noise:
+    lm.notify(source, title, "", "")
+lm.flush_notifications()
+check(not sent, "с досок вакансий не ушло НИЧЕГО (получено %d)" % len(sent))
+check(lm._notify_state["off_profile"] == len(noise),
+      "и всё посчитано как не по профилю (%d)" % lm._notify_state["off_profile"])
+
+sent[:] = []
+reset_limits()
+wanted = [
+    ("Kwork", "Настройка AI bardeen"),                 # заказ, но формулировка чудная
+    ("FL.ru", "Установить Hermes Agent на готовый VPS"),
+    ("Telegram: it_zakazy", "Доработка сайта на WordPress, 5000 руб"),
+    ("RemoteOK", "Telegram bot developer"),            # даже с доски вакансий
+    ("Личное письмо ⚡ ТЕБЕ ОТВЕТИЛИ", "Re: ваш оффер"),
+]
+for source, title in wanted:
+    lm.notify(source, title, "", "")
+lm.flush_notifications()
+check(len(sent) == len(wanted),
+      "всё по профилю дошло: %d из %d" % (len(sent), len(wanted)))
+check(sent and "Re: ваш оффер" in sent[0], "живой человек всё равно первым")
 
 print("\n" + "=" * 60)
 if failures:

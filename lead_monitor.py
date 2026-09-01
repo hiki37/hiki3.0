@@ -788,9 +788,23 @@ def source_cap(source):
 PRIORITY_DIRECT = 100   # человек написал лично и ждёт ответа - всегда первым
 PRIORITY_HOT = 60       # тг-боты, лендинги, мини-аппы
 PRIORITY_WARM = 35      # парсеры, автоматизация, интеграции, сайты
-PRIORITY_MAPS = 30      # холодный контакт с карт (с почтой - выше, см. ниже)
+PRIORITY_MAPS = 35      # холодный контакт с карт (с почтой - выше, см. ниже).
+                        # Ровно на уровне порога ниже: карты сейчас выключены,
+                        # но если включить обратно - лиды должны доходить, а не
+                        # молча отсеиваться порогом.
 PRIORITY_PLAIN = 15     # подходит по фильтру, но не профиль
 PRIORITY_HEAVY = 5      # долгая тяжёлая разработка - в конец очереди
+
+# ПОРОГ. Всё, что ниже, в Telegram не уходит ВООБЩЕ - не в конец очереди, а
+# мимо. Это и есть ответ на "без спама": сортировки мало, потому что при
+# свободном потолке следом за нужным лидом всё равно приезжали вакансии в
+# штат и тяжёлая разработка на полгода. Проходят: личные сообщения (их
+# приоритет 100 - человек уже ждёт ответа), тг-боты, лендинги, мини-аппы
+# (60), парсеры, автоматизация, интеграции, сайты (35). Не проходят: всё
+# опознанное как тяжёлое (5) и всё, что просто зацепилось за общий фильтр
+# по ключевым словам, но в профиль не попало (15).
+# Захочешь снова видеть тяжёлое - поставь PRIORITY_HEAVY, это одна строка.
+MIN_LEAD_SCORE = PRIORITY_WARM
 
 # Профиль "быстро закрываю за день": бот, лендинг, мини-апп.
 HOT_MARKERS = (
@@ -826,6 +840,21 @@ HEAVY_MARKERS = (
 )
 
 
+# Где человек РАЗМЕЩАЕТ ЗАДАЧУ, а не ищет сотрудника в штат. У этих
+# источников свой фильтр уже стоит на входе (категории Kwork, ленты FL.ru,
+# ключевые слова канала), и заказ оттуда - по определению заказ, даже если
+# сформулирован непривычно ("Настройка AI bardeen", "Установить Hermes на
+# VPS"). Поэтому им гарантирован проходной балл: порог ниже отсекает не их,
+# а доски вакансий - RemoteOK, WeWorkRemotely, SuperJob, hh, - где на одну
+# разовую задачу приходится полсотни наймов в штат.
+ORDER_SOURCES = ("kwork", "fl.ru", "telegram", "hacker news", "личное")
+
+
+def is_order_source(source):
+    low = (source or "").lower()
+    return any(marker in low for marker in ORDER_SOURCES)
+
+
 def lead_score(source, title, body):
     """Чем выше число, тем раньше лид уйдёт в Telegram при упоре в потолок."""
     low = (source or "").lower()
@@ -839,15 +868,19 @@ def lead_score(source, title, body):
     if any(marker in text for marker in HOT_MARKERS):
         return PRIORITY_HOT
     if any(marker in text for marker in HEAVY_MARKERS):
-        return PRIORITY_HEAVY
-    if any(marker in text for marker in WARM_MARKERS):
-        return PRIORITY_WARM
-    return PRIORITY_PLAIN
+        score = PRIORITY_HEAVY
+    elif any(marker in text for marker in WARM_MARKERS):
+        score = PRIORITY_WARM
+    else:
+        score = PRIORITY_PLAIN
+    # Биржа заказов - проходной балл гарантирован (см. ORDER_SOURCES выше).
+    return max(score, PRIORITY_WARM) if is_order_source(source) else score
 
 
 # Очередь этого прогона: notify кладёт сюда, flush_notifications отправляет
 # по убыванию приоритета. sent/skipped/by_source считаются уже при отправке.
-_notify_state = {"sent": 0, "skipped": 0, "by_source": {}, "queue": [], "seq": 0}
+_notify_state = {"sent": 0, "skipped": 0, "off_profile": 0,
+                 "by_source": {}, "queue": [], "seq": 0}
 
 
 # Заказчики на Hacker News и в Telegram-каналах почти всегда оставляют способ
@@ -971,6 +1004,13 @@ def flush_notifications():
 
     for item in queue:
         source = item["source"]
+
+        if item["score"] < MIN_LEAD_SCORE:
+            _notify_state["off_profile"] += 1
+            print("[-] не по профилю (%d): %s: %s"
+                  % (item["score"], source, item["title"]))
+            continue
+
         from_source = _notify_state["by_source"].get(source, 0)
         if (_notify_state["sent"] >= MAX_NOTIFICATIONS_PER_RUN
                 or from_source >= source_cap(source)):
@@ -3118,10 +3158,9 @@ def main():
     save_pending(_pending_state)
     if _draft_state["made"]:
         print(f"[draft] черновиков через Claude API: {_draft_state['made']}")
-    if _notify_state["skipped"]:
-        print(f"[!] отправлено {_notify_state['sent']}, отброшено по потолку "
-              f"{_notify_state['skipped']} (менее приоритетные). Лиды с карт "
-              f"вернутся на следующем круге, остальные - нет: они уже в seen.")
+    print("[итог] отправлено %d, отсеяно как не по профилю %d, отброшено по "
+          "потолку %d" % (_notify_state["sent"], _notify_state["off_profile"],
+                          _notify_state["skipped"]))
     print(f"Проверка завершена. Всего в памяти: {len(seen)}.")
 
 
