@@ -1064,12 +1064,13 @@ def check_flru(seen):
 # же прогона видно, какие ленты живы, - мёртвые из списка убираются.
 
 RU_FEEDS_ENABLED = True
-RU_FEEDS = [
-    ("Freelance.ru", "https://freelance.ru/rss/projects"),
-    ("Habr Freelance", "https://freelance.habr.com/tasks/rss"),
-    ("FreelanceJob.ru", "https://www.freelancejob.ru/rss/projects.xml"),
-    ("Kadrof", "https://www.kadrof.ru/rss/work.xml"),
-]
+# Проверено разведкой 1 сентября, все адреса в двух написаниях и с двумя
+# User-Agent: Freelance.ru - 404, Habr Freelance - 410 Gone (ленту убрали
+# совсем), Weblancer - 404, Kadrof - пустой RSS, FreelanceJob - 404,
+# Youdo - 403. Открытых лент, кроме FL.ru, у русских бирж просто не
+# осталось. Список пуст намеренно: механизм рабочий и ждёт живого адреса,
+# а проверять кандидатов надо режимом probe, а не на живом чате.
+RU_FEEDS = []
 
 
 def check_ru_feeds(seen):
@@ -2061,14 +2062,16 @@ TME_BASE = "https://t.me/s"
 # логу, какие реально отдают посты, и лишние можно вычеркнуть.
 # "distantsiya" был убран раньше: страница отдаётся, а постов в ней нет.
 TELEGRAM_CHANNELS = [
-    # Живые - подтверждено боевым прогоном (отдают посты):
+    # Проверено разведкой: отдают посты и в них живые заказы.
+    "it_zakazy",            # заказы с бюджетом и сроком прямо в заголовке
     "frilanser_vacansii",
     "freelancetaverna",
     "it_freelancer_jobs",
-    # Мёртвые убраны там же: distantsiya_rabota, freelance_rus,
-    # job_it_freelance, workzavtra, freelancerrus, remote_ru_jobs -
-    # все шесть отдали пустую страницу. Новых кандидатов проверяй режимом
-    # разведки (галочка probe у Run workflow), а не на живом чате.
+    # Пустыми оказались: distantsiya_rabota, freelance_rus, job_it_freelance,
+    # workzavtra, freelancerrus, remote_ru_jobs, freelance_ru_it, workinbot,
+    # freelancebot_job, tg_jobs_it, dev_jobs_ru, botdev_jobs, freelancer_ru,
+    # zakazy_it, freelance_it_job. python_zakaz и udalenka_it живы, но в них
+    # по одному-четыре поста с момента создания - смысла нет.
 ]
 
 # Максимум постов из одного канала за прогон - страница t.me/s отдаёт около

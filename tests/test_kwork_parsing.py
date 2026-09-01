@@ -974,8 +974,11 @@ check(len(lm.TELEGRAM_CHANNELS) >= 3,
       "в списке только живые каналы: %d" % len(lm.TELEGRAM_CHANNELS))
 check(hasattr(lm, "probe_sources"),
       "есть режим разведки: новые ленты и каналы проверяются в CI, а не в чате")
-check(lm.RU_FEEDS_ENABLED and len(lm.RU_FEEDS) >= 3,
-      "русские биржи по RSS подключены (%d лент)" % len(lm.RU_FEEDS))
+check(lm.RU_FEEDS_ENABLED,
+      "механизм лент бирж включён и ждёт живого адреса (сейчас %d)"
+      % len(lm.RU_FEEDS))
+check("it_zakazy" in lm.TELEGRAM_CHANNELS,
+      "канал с заказами, найденный разведкой, подключён")
 
 print("\n46. Лента биржи: мимо фильтра не проходит лишнее")
 sent[:] = []
