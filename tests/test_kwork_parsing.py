@@ -951,13 +951,29 @@ ru_good = ["Нужен телеграм-бот для записи", "Сдела
 for good in ru_good:
     check(lm.matches_keywords(good), "поймано как надо: %s" % good)
 
+print("\n44c. В каналах ловим заказы, а не найм в штат")
+tg_junk = ["#ios #office", "#Moskva #android #fulltime",
+           "\u200b\u200b #ищу #мерч #дизайнер",
+           "#вакансия #middle #разработчик #удаленка #Java",
+           "Ищу работу, python-разработчик, резюме внутри"]
+for post in tg_junk:
+    check(not lm.tg_post_fits(post), "отсеяно: %s" % post.strip()[:45])
+tg_good = ["Нужен телеграм-бот для записи клиентов, оплата 15000",
+           "Ищу разработчика лендинга под ключ, есть текст и фото",
+           "Нужен парсер маркетплейса на python, выгрузка в excel",
+           "Требуется мини-апп в телеграм для приёма заявок"]
+for post in tg_good:
+    check(lm.tg_post_fits(post), "пропущено: %s" % post[:45])
+
 print("\n45. Настройки потока: карты выключены, потолки под фриланс")
 check(OSM_ENABLED_BY_DEFAULT is False,
       "источник карт выключен по умолчанию - в чат идут только заказы")
 check(lm.MAX_NOTIFICATIONS_PER_RUN <= 12,
       "потолок за прогон не больше 12 (сейчас %d)" % lm.MAX_NOTIFICATIONS_PER_RUN)
-check(len(lm.TELEGRAM_CHANNELS) >= 5,
-      "телеграм-каналов в списке %d" % len(lm.TELEGRAM_CHANNELS))
+check(len(lm.TELEGRAM_CHANNELS) >= 3,
+      "в списке только живые каналы: %d" % len(lm.TELEGRAM_CHANNELS))
+check(hasattr(lm, "probe_sources"),
+      "есть режим разведки: новые ленты и каналы проверяются в CI, а не в чате")
 check(lm.RU_FEEDS_ENABLED and len(lm.RU_FEEDS) >= 3,
       "русские биржи по RSS подключены (%d лент)" % len(lm.RU_FEEDS))
 
@@ -981,7 +997,7 @@ class FakeFeed:
     ]
 
 real_fetch_feed = lm.fetch_feed
-lm.fetch_feed = lambda url, timeout=15: FakeFeed()
+lm.fetch_feed = lambda url, timeout=15, user_agent=None: FakeFeed()
 lm.RU_FEEDS = [("Freelance.ru", "https://freelance.ru/rss/projects")]
 try:
     lm.check_ru_feeds(set())

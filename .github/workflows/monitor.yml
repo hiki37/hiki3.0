@@ -11,6 +11,10 @@ on:
         description: 'Проверка кнопки: прислать тестовое письмо самому себе'
         type: boolean
         default: false
+      probe:
+        description: 'Разведка источников: проверить ленты и каналы, ничего не слать'
+        type: boolean
+        default: false
   # Подстраховка на случай, если cron-job.org отвалится (у него кончится
   # бесплатный лимит, поменяется токен, упадёт сам сервис). Раз в час - это
   # редко, поэтому даже ненадёжный встроенный schedule лишним не будет:
@@ -61,7 +65,7 @@ jobs:
           HH_CONTACT: ${{ secrets.HH_CONTACT }}
           SMTP_HOST: ${{ secrets.SMTP_HOST }}
           MAIL_FROM_NAME: ${{ secrets.MAIL_FROM_NAME }}
-        run: python lead_monitor.py ${{ inputs.test_button == true && '--test-button' || '' }}
+        run: python lead_monitor.py ${{ inputs.test_button == true && '--test-button' || '' }} ${{ inputs.probe == true && '--probe' || '' }}
 
       - name: Save seen-leads state back to the repo
         run: |

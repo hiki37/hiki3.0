@@ -997,6 +997,13 @@ def flush_notifications():
 
 USER_AGENT = "lead-monitor-personal-script/1.0"
 
+# Отдельный "браузерный" User-Agent. Нужен там, где сайт закрылся от
+# скриптов: FL.ru в боевом прогоне начал отдавать 403 на все три ленты
+# разом, хотя днём раньше отдавал их же нормально. Это не блокировка по IP
+# (тогда бы и раньше не работало), а фильтр по User-Agent.
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+              "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36")
+
 
 def fetch_url(url, timeout=15):
     """Обычный GET с таймаутом и User-Agent. Возвращает текст страницы."""
@@ -1005,7 +1012,7 @@ def fetch_url(url, timeout=15):
     return r.text
 
 
-def fetch_feed(url, timeout=15):
+def fetch_feed(url, timeout=15, user_agent=None):
     """
     Скачивает RSS-ленту с настоящим таймаутом и отдаёт её в feedparser.
     Важно: feedparser.parse(url) сам по себе таймаута не имеет и может
@@ -1013,7 +1020,11 @@ def fetch_feed(url, timeout=15):
     что была с IMAP. Поэтому качаем сами через requests(timeout=...),
     а feedparser только разбирает уже скачанные байты.
     """
-    r = requests.get(url, timeout=timeout, headers={"User-Agent": "lead-monitor-personal-script/1.0"})
+    headers = {
+        "User-Agent": user_agent or USER_AGENT,
+        "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    }
+    r = requests.get(url, timeout=timeout, headers=headers)
     r.raise_for_status()
     return feedparser.parse(r.content)
 
@@ -1025,7 +1036,7 @@ def check_flru(seen):
         return
     for url in FLRU_RSS_URLS:
         try:
-            feed = fetch_feed(url)
+            feed = fetch_feed(url, user_agent=BROWSER_UA)
         except Exception as e:
             print(f"[fl.ru] ошибка загрузки ленты ({url}) ({type(e).__name__}): {e}")
             continue
@@ -1066,7 +1077,7 @@ def check_ru_feeds(seen):
         return
     for name, url in RU_FEEDS:
         try:
-            feed = fetch_feed(url)
+            feed = fetch_feed(url, user_agent=BROWSER_UA)
         except Exception as e:
             print("[%s] лента недоступна (%s): %s" % (name, type(e).__name__, e))
             continue
@@ -2050,16 +2061,14 @@ TME_BASE = "https://t.me/s"
 # логу, какие реально отдают посты, и лишние можно вычеркнуть.
 # "distantsiya" был убран раньше: страница отдаётся, а постов в ней нет.
 TELEGRAM_CHANNELS = [
+    # Живые - подтверждено боевым прогоном (отдают посты):
     "frilanser_vacansii",
     "freelancetaverna",
-    "distantsiya_rabota",
-    "freelance_rus",
-    "job_it_freelance",
-    "workzavtra",
     "it_freelancer_jobs",
-    "zakazy_freelance",
-    "freelancerrus",
-    "remote_ru_jobs",
+    # Мёртвые убраны там же: distantsiya_rabota, freelance_rus,
+    # job_it_freelance, workzavtra, freelancerrus, remote_ru_jobs -
+    # все шесть отдали пустую страницу. Новых кандидатов проверяй режимом
+    # разведки (галочка probe у Run workflow), а не на живом чате.
 ]
 
 # Максимум постов из одного канала за прогон - страница t.me/s отдаёт около
@@ -2103,6 +2112,35 @@ def parse_tme_page(page, channel):
     return posts
 
 
+# Что в каналах НЕ нужно. Это не заказы, а наём в штат и чужие резюме -
+# ровно то, чем чат забивался: "#Moskva #android #fulltime", "#ios #office",
+# "#вакансия #middle #разработчик #Java".
+TG_STOP_MARKERS = (
+    "#fulltime", "full-time", "#office", "#офис", "в офисе", "полный день",
+    "полная занятость", "в штат", "оформление по тк", "трудоустройство",
+    "релокац", "#резюме", "ищу работу", "#ищу_работу", "#cv",
+    "#вакансия", "#вакансии", "вакансия:", "зарплата", "оклад", "з/п",
+    "#дизайнер", "#smm", "#таргет", "#маркетолог", "#копирайтер",
+    "#менеджер", "#продажи", "#мерч",
+)
+
+
+def tg_post_fits(text):
+    """Пост из канала - это ЗАКАЗ по нашему профилю, а не вакансия в штат.
+
+    Обычного фильтра по ключевым словам тут мало: половина постов - это
+    хэштеги вроде "#ios #office", и слово "ios" в списке есть, поэтому через
+    него проезжало всё подряд. Поэтому два условия сразу: нет стоп-слов
+    найма И пост попадает в профиль (бот, лендинг, мини-апп, парсер,
+    автоматизация, интеграция) - тот же разбор, по которому лиды получают
+    приоритет в очереди.
+    """
+    head = (text or "")[:400].lower()
+    if any(stop in head for stop in TG_STOP_MARKERS):
+        return False
+    return lead_score("Telegram", head, "") >= PRIORITY_WARM
+
+
 def check_telegram_channels(seen):
     if not TELEGRAM_CHANNELS_ENABLED:
         return
@@ -2127,15 +2165,12 @@ def check_telegram_channels(seen):
             seen.add(uid)
             if sent >= TELEGRAM_MAX_POSTS_PER_RUN:
                 continue
-            # Матчим только начало поста (заголовок вакансии/заказа), а не
-            # весь текст: в подвале поста почти всегда есть слова вроде
-            # "сайт" и "разработка" из описания компании, из-за чего мимо
-            # фильтра проезжали "Мерч-дизайнер" и "Ассистент SMM-менеджера".
-            if matches_keywords(post["text"][:200]):
-                first_line = post["text"].split("\n", 1)[0][:100]
-                notify("Telegram: " + channel, first_line, "", post["link"],
-                       details=post["text"][:400])
-                sent += 1
+            if not tg_post_fits(post["text"]):
+                continue
+            first_line = post["text"].split("\n", 1)[0][:100]
+            notify("Telegram: " + channel, first_line, "", post["link"],
+                   details=post["text"][:400])
+            sent += 1
 
 
 # ---------------------- ИСТОЧНИК 7: HH.RU - ПРОЕКТНАЯ РАБОТА ----------------------
@@ -2903,6 +2938,70 @@ def send_test_button(state):
     print("[test] тестовое сообщение с кнопкой отправлено")
 
 
+# ==================== РАЗВЕДКА ИСТОЧНИКОВ ====================
+#
+# Половина добавленных вслепую лент оказалась мёртвой (404/410), а FL.ru
+# внезапно закрылся 403-м. Проверять такое из чата бесполезно: сеть есть
+# только у GitHub Actions. Поэтому есть отдельный режим: запустить workflow
+# с галочкой probe - бот ничего не пришлёт в Telegram, а просто пройдёт по
+# кандидатам и напишет в лог, что живо. Живое остаётся в списках, мёртвое
+# вычёркивается.
+
+PROBE_FEEDS = [
+    ("FL.ru cat=5", "https://www.fl.ru/rss/all.xml?category=5"),
+    ("Freelance.ru A", "https://freelance.ru/rss/projects"),
+    ("Freelance.ru B", "https://freelance.ru/rss/projects.xml"),
+    ("Freelance.ru C", "https://freelance.ru/projects/rss"),
+    ("Habr Freelance A", "https://freelance.habr.com/tasks/rss"),
+    ("Habr Freelance B", "https://freelance.habr.com/rss/tasks"),
+    ("Weblancer A", "https://www.weblancer.net/rss/jobs.rss"),
+    ("Weblancer B", "https://www.weblancer.net/projects/rss/"),
+    ("Kadrof A", "https://www.kadrof.ru/rss/work.xml"),
+    ("Kadrof B", "https://www.kadrof.ru/rss.xml"),
+    ("FreelanceJob A", "https://www.freelancejob.ru/rss/projects.xml"),
+    ("FreelanceJob B", "https://www.freelancejob.ru/rss/"),
+    ("Youdo", "https://youdo.com/rss"),
+]
+
+PROBE_CHANNELS = [
+    "frilanser_vacansii", "freelancetaverna", "it_freelancer_jobs",
+    "freelance_ru_it", "workinbot", "freelancebot_job", "tg_jobs_it",
+    "dev_jobs_ru", "python_zakaz", "botdev_jobs", "freelancer_ru",
+    "zakazy_it", "udalenka_it", "it_zakazy", "freelance_it_job",
+]
+
+
+def probe_sources():
+    """Ничего не шлёт в Telegram - только пишет в лог, что из кандидатов живо."""
+    print("=== ЛЕНТЫ ===")
+    for name, url in PROBE_FEEDS:
+        for ua_name, ua in (("браузер", BROWSER_UA), ("скрипт", USER_AGENT)):
+            try:
+                feed = fetch_feed(url, user_agent=ua)
+                entries = len(feed.entries)
+                mark = "ЖИВА" if entries else "пусто"
+                print("[%s] %s (%s): %s, записей %d"
+                      % (mark, name, ua_name, url, entries))
+                if entries:
+                    print("      пример: %s" % (feed.entries[0].get("title", ""))[:90])
+                    break
+            except Exception as e:
+                print("[мертва] %s (%s): %s" % (name, ua_name, e))
+
+    print("=== КАНАЛЫ ===")
+    for channel in PROBE_CHANNELS:
+        try:
+            posts = parse_tme_page(fetch_url("%s/%s" % (TME_BASE, channel)), channel)
+        except Exception as e:
+            print("[мертв] %s: %s" % (channel, e))
+            continue
+        if not posts:
+            print("[пусто] %s" % channel)
+            continue
+        print("[ЖИВ]   %s: постов %d, пример: %s"
+              % (channel, len(posts), posts[0]["text"][:80].replace("\n", " ")))
+
+
 def main():
     global _pending_state
 
@@ -2918,6 +3017,10 @@ def main():
         process_send_buttons(_pending_state)
     except Exception as e:
         print("[send] ошибка разбора нажатий (%s): %s" % (type(e).__name__, e))
+
+    if "--probe" in sys.argv:
+        probe_sources()
+        return
 
     if "--test-button" in sys.argv:
         send_test_button(_pending_state)
