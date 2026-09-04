@@ -2103,7 +2103,10 @@ TME_BASE = "https://t.me/s"
 # "distantsiya" был убран раньше: страница отдаётся, а постов в ней нет.
 TELEGRAM_CHANNELS = [
     # Проверено разведкой: отдают посты и в них живые заказы.
-    "it_zakazy",            # заказы с бюджетом и сроком прямо в заголовке
+    # "it_zakazy" убран: канал оказался автоперепечаткой Kwork. Заказы там
+    # те же самые, но приходят с задержкой - то есть к моменту поста по ним
+    # уже отписались десятки исполнителей. Kwork у нас и так есть напрямую
+    # письмами, и приходит он раньше, чем этот канал.
     "frilanser_vacansii",
     "freelancetaverna",
     "it_freelancer_jobs",
@@ -2168,6 +2171,15 @@ TG_STOP_MARKERS = (
 )
 
 
+# Перепечатки с бирж. Канал, который автоматом переливает заказы с Kwork
+# или FL.ru, бесполезен по определению: те же заказы у нас уже есть
+# напрямую и приходят раньше, а к моменту поста по ним уже отписались
+# десятки человек. Ссылка на биржу в тексте поста - самый надёжный признак.
+TG_REPOST_MARKERS = ("kwork.ru", "kwork.com", "fl.ru", "weblancer.net",
+                     "freelance.ru", "youdo.com", "workzilla",
+                     "с биржи kwork", "заказ с биржи")
+
+
 def tg_post_fits(text):
     """Пост из канала - это ЗАКАЗ по нашему профилю, а не вакансия в штат.
 
@@ -2178,7 +2190,10 @@ def tg_post_fits(text):
     автоматизация, интеграция) - тот же разбор, по которому лиды получают
     приоритет в очереди.
     """
-    head = (text or "")[:400].lower()
+    low = (text or "").lower()
+    if any(marker in low for marker in TG_REPOST_MARKERS):
+        return False
+    head = low[:400]
     if any(stop in head for stop in TG_STOP_MARKERS):
         return False
     return lead_score("Telegram", head, "") >= PRIORITY_WARM

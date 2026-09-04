@@ -960,6 +960,15 @@ tg_junk = ["#ios #office", "#Moskva #android #fulltime",
            "Ищу работу, python-разработчик, резюме внутри"]
 for post in tg_junk:
     check(not lm.tg_post_fits(post), "отсеяно: %s" % post.strip()[:45])
+tg_reposts = [
+    "Нужен телеграм-бот для записи. Подробнее: https://kwork.ru/projects/123",
+    "Разработка лендинга, заказ с биржи FL.ru https://www.fl.ru/projects/1",
+    "Парсер маркетплейса, https://weblancer.net/projects/2",
+]
+for post in tg_reposts:
+    check(not lm.tg_post_fits(post),
+          "перепечатка с биржи отсеяна: %s" % post[:40])
+
 tg_good = ["Нужен телеграм-бот для записи клиентов, оплата 15000",
            "Ищу разработчика лендинга под ключ, есть текст и фото",
            "Нужен парсер маркетплейса на python, выгрузка в excel",
@@ -979,8 +988,8 @@ check(hasattr(lm, "probe_sources"),
 check(lm.RU_FEEDS_ENABLED,
       "механизм лент бирж включён и ждёт живого адреса (сейчас %d)"
       % len(lm.RU_FEEDS))
-check("it_zakazy" in lm.TELEGRAM_CHANNELS,
-      "канал с заказами, найденный разведкой, подключён")
+check("it_zakazy" not in lm.TELEGRAM_CHANNELS,
+      "канал-автоперепечатка Kwork отключён: те же заказы у нас есть раньше")
 
 print("\n46. Лента биржи: мимо фильтра не проходит лишнее")
 sent[:] = []
